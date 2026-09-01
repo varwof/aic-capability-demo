@@ -1,0 +1,105 @@
+{
+  "locale": "en",
+  "listeners": [
+    {
+      "name": "llm",
+      "listen": "127.0.0.1:9443",
+      "protocol": "http2",
+      "tls": {
+        "mode": "server",
+        "cert_file": "${GATEWAY_CERT}",
+        "key_file": "${GATEWAY_KEY}",
+        "jwt_ca_file": "${JWT_CA}",
+        "jwt_issuer": "varwof-core",
+        "jwt_audience": [
+          "varwof-core"
+        ]
+      },
+      "routes": [
+        {
+          "path": "/v1/query",
+          "target": "http://127.0.0.1:9100",
+          "required_capabilities": [
+            "std/database-v1:query:SELECT"
+          ]
+        },
+        {
+          "path": "/v1/chat/completions",
+          "target": "http://127.0.0.1:9200",
+          "required_capabilities": [
+            "varwof/llm:chat"
+          ]
+        },
+        {
+          "path": "/v1/wallet/balance",
+          "target": "http://127.0.0.1:9300",
+          "required_capabilities": [
+            "std/wallet-v1:balance"
+          ]
+        },
+        {
+          "path": "/v1/wallet/transfer",
+          "target": "http://127.0.0.1:9300",
+          "required_capabilities": [
+            "std/wallet-v1:transfer"
+          ]
+        },
+        {
+          "path": "/v1/wallet/history",
+          "target": "http://127.0.0.1:9300",
+          "required_capabilities": [
+            "std/wallet-v1:history"
+          ]
+        },
+        {
+          "path": "/v1/deploy/apply",
+          "target": "http://127.0.0.1:9400",
+          "required_capabilities": [
+            "std/deploy-v1:deploy:apply"
+          ]
+        },
+        {
+          "path": "/v1/infra/read",
+          "target": "http://127.0.0.1:9400",
+          "required_capabilities": [
+            "std/deploy-v1:infra:read"
+          ]
+        },
+        {
+          "path": "/v1/secrets/read",
+          "target": "http://127.0.0.1:9400",
+          "required_capabilities": [
+            "std/deploy-v1:secret:read"
+          ]
+        },
+        {
+          "path": "/mcp",
+          "target": "http://127.0.0.1:9500",
+          "required_capabilities": [
+            "std/mcp-v1:tools:call"
+          ]
+        }
+      ]
+    }
+  ],
+  "capability_schemes": "capdata",
+  "capability_schemes_trust": "capdata/trust/demo-codesign-ca.pem",
+  "capability_plugins": {
+    "std/database-v1": {
+      "type": "database",
+      "config": {}
+    },
+    "std/wallet-v1": {
+      "type": "wallet",
+      "config": {}
+    },
+    "std/deploy-v1": {
+      "type": "deploy",
+      "config": {}
+    },
+    "std/mcp-v1": {
+      "type": "mcp",
+      "config": {}
+    }
+  }
+}
