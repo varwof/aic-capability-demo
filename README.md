@@ -9,15 +9,18 @@ infrastructure, and MCP tool calls. Everything is reproducible and auditable.
 ## 0. Clone and run (3 steps on a fresh machine)
 
 ```bash
-git clone git@github.com:varwof/aic-capability-demo.git && cd aic-capability-demo
-# 1) Build the binaries (core/client/gateway-http/gen-capability) — see IMAN-TEST-GUIDE §4
-# 2) Generate the gateway config from your own CA-issued certs
+git clone https://github.com/varwof/aic-capability-demo.git && cd aic-capability-demo
+# 1) Build all binaries from pinned commits (one command)
+./build.sh && export PATH="$PWD/bin:$PATH"
+# 2) Bootstrap a CA, issue a principal certificate (IMAN-TEST-GUIDE §6)
+# 3) Generate the gateway config from your CA-issued certs
 ./setup.sh --gateway-cert gw.pem --gateway-key gw.key --jwt-ca issuing-ca.pem
-# 3) Start backends + gateway, run any scenario
+# 4) Start backends + gateway, run any scenario
 python3 backends.py &
 gateway-http --config gateway.json &      # run from this directory (relative capdata paths)
-python3 wallet-demo.py --principal-cert principal.pem --principal-key principal.key \
-  --client-config client.json --ca-cert ca-bundle.pem --pa-authz --execute
+python3 scenario-demo.py --scenario mcp --principal-cert principal.pem \
+  --principal-key principal.key --client-config client.json --ca-cert ca-bundle.pem \
+  --pa-authz --execute
 ```
 
 - The `.p7s` files in `capdata/` are signed by `capdata/trust/demo-codesign-ca.pem`
@@ -57,6 +60,7 @@ python3 wallet-demo.py --principal-cert principal.pem --principal-key principal.
 | `wallet-demo.py` | Wallet scenario end-to-end + 6-case matrix |
 | `scenario-demo.py` | Deploy/MCP scenarios (`--scenario deploy|mcp`) |
 | `backends.py` | Mock backends: data :9100 / LLM :9200 / wallet :9300 / deploy :9400 / MCP :9500 |
+| `build.sh` | One-command build of all binaries from pinned commits |
 | `gateway.json.template` + `setup.sh` | Portable gateway config generation |
 | `capdata/` | Capability schemes + PKCS#7 signatures + demo trust root |
 
