@@ -102,8 +102,10 @@ gateway serves only its leaf certificate.
   replicas over 403, secret allowlist 200/403).
 - **mcp** (std/mcp-v1): MCP JSON-RPC tools/call must reference an allowlisted
   tool; protocol methods (initialize/ping/tools/list) pass read-only.
-  5 cases: read_file 200, bash 403, list_dir 200, initialize 200,
-  delete_file 403.
+  5 base cases: read_file 200, bash 403, list_dir 200, initialize 200,
+  delete_file 403; plus hostile boundary cases (gateway-core v0.4.6):
+  missing params.name, declared empty "tools":[], /workspace-evil sibling,
+  /workspace/../etc parent traversal -> 403.
 
 Schemes are signed in `capdata/`; add the matching grants to the operator
 role in authz.json for `--pa-authz`.

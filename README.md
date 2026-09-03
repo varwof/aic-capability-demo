@@ -47,7 +47,7 @@ python3 scenario-demo.py --scenario mcp --principal-cert principal.pem \
 | Database | `std/database-v1` | query:SELECT/INSERT/UPDATE/DELETE/EXECUTE, admin:DDL/TRUNCATE | tables, columns, row_filter, limit |
 | Digital wallet | `std/wallet-v1` | balance / transfer / history | assets, networks, max_amount_per_tx, recipients allowlist |
 | Deploy/infra | `std/deploy-v1` | deploy:apply / infra:read / secret:read | environments, namespaces, resources, max_replicas, secrets allowlist |
-| MCP tools | `std/mcp-v1` | tools:call | tools allowlist (dangerous tools excluded) |
+| MCP tools | `std/mcp-v1` | tools:call | tools allowlist (declared empty = deny) + tool_args/path_prefixes |
 | LLM | `varwof/llm` | chat | model, max_tokens |
 
 ## 3. Files
@@ -71,7 +71,9 @@ python3 scenario-demo.py --scenario mcp --principal-cert principal.pem \
   unauthorized asset 403; balance 200/403
 - **deploy**: staging 200; production / out-of-scope namespace / over replicas 403;
   secret allowlist 200/403
-- **mcp**: read_file/list_dir 200; bash/delete_file 403; initialize protocol 200
+- **mcp**: read_file/list_dir 200; bash/delete_file 403; initialize protocol 200;
+  hostile boundary (v0.4.6): missing params.name / declared empty allowlist /
+  /workspace-evil sibling / /workspace/../etc parent traversal -> 403
 - **replay protection**: same JWT twice -> 200 then 401
 
 ## 5. Implementation commits behind the claims
@@ -82,9 +84,9 @@ python3 scenario-demo.py --scenario mcp --principal-cert principal.pem \
 | varwof/types | addb8b0 / 4868765 | capability/grant JSON-container params; HTTPFacts/PluginContext body |
 | varwof/client | 44b210b / 6b74b23 / 9dbd21e | caps/pa JSON params, --from-claims, --pa-authz role intersection |
 | varwof/core | 1a6cbe7 / ed42b00 | generic parameter-subset at issuance; claims digest in issuance audit |
-| varwof/gateway-core | v0.4.1–v0.4.4 | database/wallet/deploy/mcp plugins; bearer fail-closed |
+| varwof/gateway-core | v0.4.1–v0.4.6 (9674d7c) | database/wallet/deploy/mcp plugins; bearer fail-closed; hostile path/allowlist boundary fix |
 | varwof/gateway | 763b6ce / 779481d / a35d9c6 | body to plugins; capreg .p7s verification; plugin wiring |
-| varwof/capability | 10162b5 / d225486 / d8bd1c3 / f124868 | std/database-v1, std/wallet-v1, std/deploy-v1, std/mcp-v1, varwof/llm |
+| varwof/capability | 10162b5 / d225486 / d8bd1c3 / f124868 / 24a9ca9 | std/database-v1, std/wallet-v1, std/deploy-v1, std/mcp-v1 (v1.1.0 doc), varwof/llm |
 
 ## 6. Security properties demonstrated
 
