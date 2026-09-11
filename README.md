@@ -1,5 +1,8 @@
 # Varwof AIC — Capability Semantics Demo Package
 
+> ⭐ Like this repo? Give a star to the flagship one:
+> [![GitHub stars](https://img.shields.io/github/stars/varwof/core?style=social&label=varwof/core)](https://github.com/varwof/core)
+
 A runnable, end-to-end demonstration of the AIC capability authorization
 semantics: **AI-proposed least privilege → tool validation (version pinned) →
 role-grant intersection → cryptographically bound into the AIC → gateway
