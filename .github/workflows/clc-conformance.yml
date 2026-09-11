@@ -1,0 +1,58 @@
+name: clc-conformance
+
+# CLC-v1 语义一致性：本仓（Python + TypeScript 独立实现）必须与 capability 仓的
+# 向量逐条一致（verdict + 规范码 reason 双断言）。与 register 仓的 Go 实现
+# 互为一对照。依赖：向量在独立仓 varwof/capability，本 workflow 会浅克隆到 ../capability。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  vectors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch CLC-v1 vectors (capability repo)
+        run: git clone --depth 1 https://github.com/varwof/capability.git ../capability
+
+      - name: Syntax check
+        run: python3 -m py_compile clc_semantics.py vectors-run.py
+
+      - name: CLC-v1 vectors (verdict + reason)
+        env:
+          CLC_VECTORS: ../capability/data/_vectors/clc-v1/vectors.json
+        run: python3 vectors-run.py
+
+      - name: P11 property (composition narrows only)
+        env:
+          CLC_PROPERTY_CASES: ../capability/data/_vectors/clc-v1/property-cases.json
+        run: python3 property_test.py
+
+  ts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Fetch CLC-v1 vectors (capability repo)
+        run: git clone --depth 1 https://github.com/varwof/capability.git ../capability
+
+      - name: CLC-v1 vectors (verdict + reason, TS)
+        env:
+          CLC_VECTORS: ../capability/data/_vectors/clc-v1/vectors.json
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/vectors-run.ts
+
+      - name: P11 property (composition narrows only, TS)
+        env:
+          CLC_PROPERTY_CASES: ../capability/data/_vectors/clc-v1/property-cases.json
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/property.ts

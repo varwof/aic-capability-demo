@@ -1,2 +1,4 @@
 bin/
 deps/
+__pycache__/
+*.pyc

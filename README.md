@@ -63,6 +63,9 @@ python3 scenario-demo.py --scenario mcp --principal-cert principal.pem \
 | `build.sh` | One-command build of all binaries from pinned commits |
 | `gateway.json.template` + `setup.sh` | Portable gateway config generation |
 | `capdata/` | Capability schemes + PKCS#7 signatures + demo trust root |
+| `clc_semantics.py` / `vectors-run.py` / `property_test.py` | Python CLC-v1 implementation + vectors runner + P11 property runner |
+| `ts/` | TypeScript CLC-v1 implementation + the same two runners (Node-only, zero npm deps) |
+| `clc-v1-parity-report.md` | Cross-implementation parity record |
 
 ## 4. Verification matrices (all pass)
 
@@ -106,3 +109,34 @@ python3 scenario-demo.py --scenario mcp --principal-cert principal.pem \
 - Rate limits (wallet daily, mcp rpm) are parameter placeholders, not yet enforced
 - Plugins use structured operation payloads; real SQL/wallet/deploy APIs need
   their own adapters
+
+## 8. CLC-v1 implementations and conformance corpora
+
+Three implementations run the **same** corpus and assert **verdict, normative
+reason code and the merged intersection result**:
+
+| Implementation | Where | Vectors runner | Property runner |
+|---|---|---|---|
+| Go | `varwof/register` (`semantics/`) | `go run ./cmd/vectors-run/` | `go test ./semantics/ -run TestIntersectionProperty` |
+| Python | this repo | `python3 vectors-run.py` | `python3 property_test.py` |
+| TypeScript | `ts/` (Node 22 `--experimental-strip-types`, zero npm deps) | `node --experimental-strip-types ts/vectors-run.ts` | `node --experimental-strip-types ts/property.ts` |
+
+```bash
+# all three, against the shared corpora in varwof/capability
+export CLC_VECTORS=../capability/data/_vectors/clc-v1/vectors.json
+python3 vectors-run.py && python3 property_test.py
+(cd ts && node --experimental-strip-types vectors-run.ts && node --experimental-strip-types property.ts)
+(cd ../register && go run ./cmd/vectors-run/ && go test ./semantics/ -run TestIntersectionProperty)
+```
+
+Corpora (in `varwof/capability`, `data/_vectors/clc-v1/`): `vectors.json`
+(83 vectors), `property-cases.json` (524 deterministic P11 cases),
+`offline-vectors.json` (OCMP reference cases).
+
+Why three: a language is only as strong as the agreement between independent
+interpreters, and the three disagreed on real inputs until 2026-09-11 — the Go
+and Python implementations each violated a rule the TypeScript one already
+followed (boolean-exactness, layer-6-before-layer-7, layer-1 code
+propagation).  The parity record is in `clc-v1-parity-report.md`; the CI in
+`.github/workflows/clc-conformance.yml` clones `varwof/capability` and runs
+`py_compile`, the vectors and the property suite on every push and PR.
