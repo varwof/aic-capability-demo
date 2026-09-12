@@ -1,20 +1,22 @@
 # CLC-v1 Parity Report
 
-Date: 2026-09-11 (rev 10: three implementations — Go / Python / TypeScript, 76/76 verbatim + P11 property parity)
+Date: 2026-09-12 (rev 12: CLC-1.3 closeout — 98 vectors; `allow_unresolved` independent verdict, (scheme,type) constraint identity, same-day time-window grammar, `{}`≡absent params, §9.3 multi-grant aggregation; Go/Python/TS parity)
 
 ## Summary
 
 | Metric | Value |
 |--------|-------|
-| Total vectors | 76 |
-| Go (register/semantics) | 76/76 PASS |
-| Python (aic-capability-demo/clc_semantics) | 76/76 PASS |
-| TypeScript (aic-capability-demo/ts/clc_semantics) | 76/76 PASS |
+| Total vectors | 98 |
+| Go (register/semantics) | 98/98 PASS |
+| Python (aic-capability-demo/clc_semantics) | 98/98 PASS |
+| TypeScript (aic-capability-demo/ts/clc_semantics) | 98/98 PASS |
 | Verdict consistency | 100% (3 implementations) |
 | Reason-code consistency (cross-implementation) | 100% (3 implementations) |
 | Reason-code consistency (impl vs vector expectation) | **100%** |
 | Reason assertion in runners | **enforced (canonical code, §9.4)** |
-| P11 property (intersection, shared 524 cases) | 524 cases / 299 order-symmetry checks / 290 closure probes / 0 failures in Go, Python and TS |
+| `expect.unresolved` assertion | **enforced (sorted compare, present on decidable vectors)** |
+| `allow_unresolved` verdict assertion | **enforced (rev CLC-1.3, decide-019/020/024, 028..030)** |
+| P11 property (intersection, shared 1184 cases) | 1184 cases / 869 order-symmetry checks / 841 closure probes / 0 failures in Go, Python and TS (Go verified with `-count=1`; after the rev CLC-1.3 `{}`≡absent rule the closure probe skips empty-params merged grants — see Addendum 2) |
 | Differences | 0 |
 
 ## Per-Kind Breakdown
@@ -23,12 +25,12 @@ Grouped by `kind` field (as in vectors.json):
 
 | Kind | Count | Go Pass | Python Pass | TS Pass | Match |
 |------|-------|---------|-------------|---------|-------|
-| syntax | 6 | 6 | 6 | 6 | ✓ |
-| entail | 31 | 31 | 31 | 31 | ✓ |
+| syntax | 9 | 9 | 9 | 9 | ✓ |
+| entail | 37 | 37 | 37 | 37 | ✓ |
 | intersect | 14 | 14 | 14 | 14 | ✓ |
-| decide | 25 | 25 | 25 | 25 | ✓ |
+| decide | 38 | 38 | 38 | 38 | ✓ |
 
-TS runner output is **byte-identical** to the Python runner output on all 76
+TS runner output is **byte-identical** to the Python runner output on all 98
 rows and on the property summary line (`diff` clean), so cross-parity is a
 plain diff, not a re-sampled reading.
 
@@ -36,11 +38,11 @@ Grouped by appendix semantic category (as in the spec):
 
 | Appendix | Count | Vectors |
 |----------|-------|---------|
-| B.1 syntax | 6 | syntax-001..006 |
+| B.1 syntax | 9 | syntax-001..009 |
 | B.2 entail | 6 | entail-001..006 |
-| B.3 params | 21 | params-001..021 |
+| B.3 params | 27 | params-001..027 |
 | B.4 intersect | 10 | intersect-001..010 |
-| B.5 decision | 16 | decide-001..009, decide-015, revision-001..002, undeclared-001..002, decide-016..017 |
+| B.5 decision | 29 | decide-001..009, decide-015..018, revision-001..002, undeclared-001..002, decide-019..030 |
 | B.6 combined | 11 | combined-001..011 |
 | scheme stress-test | 6 | clinical-001..002, payments-001..002, data-001..002 |
 
@@ -55,11 +57,14 @@ produce (verified Go==Python and impl==vector):
 | `wildcard_requires_trailing_segment` | entail-005 | wildcard with no trailing segment |
 | `literal_mismatch` | entail-006 | literal ID mismatch (path level) |
 | `different_namespace` | entail-004 | scheme or action Class differs |
-| `invalid_capability_id` | decide-004, combined-010 | malformed capability ID |
-| `unknown_constraint` | decide-003, payments-002 | unknown constraint type (incl. scheme-scoped types declared by `std/payments-v1` etc., §8 fail-closed) |
+| `invalid_capability_id` | syntax-007, syntax-008, decide-004, decide-025, combined-010 | malformed capability ID (§3 scheme grammar, rev CLC-1.2: no vendor `/` product `-vN`) |
+| `unknown_constraint` | decide-003, payments-002 | unrecognized constraint identity — by (scheme,type) pair since rev CLC-1.3: only `varwof/constraint-v1` types are core-recognized, so ANY other scheme's constraint (incl. a same-name `foo/db-v1:max_rows`) fails closed; §8 fail-closed |
+| `invalid_constraint` | decide-019, decide-021, decide-022 | recognized type × out-of-§8.1 value grammar: scalar `time:window:3600`, prefix-less CIDR, and the cross-midnight SINGLE-segment `22:00→06:00` (rev CLC-1.3) |
+| `allow_unresolved` (+ `unresolved`) | decide-020, decide-024 | independent verdict for recognized-but-unevaluated `network`/`time` constraints, carried on `unresolved`, never silently dropped (§8.4, rev CLC-1.3) |
+| `params_exceed_grant` (multi) | decide-030 | §9.3 multi-grant: no covering grant allows → first covering grant reason in input order (rev CLC-1.3) |
 | `capability_not_authorized` | decide-002, decide-015, decide-016, combined-006 | no covering grant; absent/empty grant (fail-closed, §9.3 pre-check resolves even when the operation is also absent); unknown scheme |
 | `missing_capability_id` | decide-017 | operation has no `id` (layer 1) |
-| `max_rows:violated` | decide-006 | constraint violation |
+| `max_rows:violated` | decide-006, decide-023 | constraint violation; `decide-023` pins the fail-closed empty-eval case (rev CLC-1.2) |
 | `params_missing` | decide-007, decide-009, combined-003, undeclared-002 | granted param omitted (or no params at all); layer-7 order — resolves before `undeclared_param` |
 | `undeclared_param` | undeclared-001 | operation param key not declared by a bounded grant (key closure, §6.2; §9.3 layer 7 request side) |
 | `params_exceed_grant` | params-002, clinical-002, data-002, combined-002 | numeric/bound exceeded |
@@ -70,8 +75,96 @@ produce (verified Go==Python and impl==vector):
 | `invalid_params_number` | params-017 | non-finite / over-precision number literal (`1e400`) (§6.2 step 3) |
 | `invalid_params_size` | params-018, params-019 | >512 bytes or nesting >32 (§6.2 step 4) |
 | `unsupported_language_revision` | revision-002 | declared revision incompatible with implementation (§12.1; revision-001 asserts compatibility → allow) |
-| `no_overlap` | intersect-003,006, combined-008 | intersection result empty |
+| `no_overlap` | intersect-003,006, combined-008 | intersection result empty; dict intersection with **different key sets** → `no_overlap` (P11 key-set rule, rev CLC-1.2, pinned by the property wall) |
 | `absent_source` | intersect-007 | intersection over zero sources: fail-closed (§7 rule 5) |
+
+## rev 11 Changes (2026-09-12) — CLC-1.2 Sweep
+
+Language revision CLC-1.2 (spec `§3`/`§7`/`§8.1`/`§8.4`/`§9`/`§12.1`, all rev-annotated)
+implemented and pinned in all three implementations **first in the spec text, then
+in code**:
+
+- **§8.4 residual-obligation channel `unresolved`**: `Authorize` now returns an
+  allow with an additive `unresolved: string[]` (sorted, deduped) for every
+  recognized constraint the core does not evaluate (time/network).  Runners assert
+  it when the vector declares `expect.unresolved` (sorted compare).  Consumers
+  must resolve residual obligations themselves or deny.
+- **§8.1 value grammar → `invalid_constraint`**: recognised = type name × value
+  grammar.  Scalar `time:window:3600`, a prefix-less CIDR → `invalid_constraint`.
+  `max_rows` must be exactly one strict JSON non-negative integer token; the
+  constraint value is `parts[2:]` joined back together (colon-bearing JSON round
+  trips).  `max_rows` with the operation carrying **no** value defaults to the
+  empty input → fail-closed `max_rows:violated` (previously silently skipped).
+- **§3 scheme grammar**: capability ids now MUST match
+  `vendor/product-vN` (`^[a-zA-Z0-9-]+/[a-zA-Z0-9-]+-v[0-9]+$`); the spec's own
+  `database:query` counter-example and `bad:op` are rejected
+  (`invalid_capability_id`).  Grant-side malformed ids still collapse to
+  `capability_not_authorized` in `Authorize` (pinned by `decide-026`); op-side
+  ids propagate the concrete layer-1 code.
+- **§7 dict key-set P11 rule**: two object values intersect only when their key
+  sets are identical, else `no_overlap`.  The property wall caught the
+  widening (prop-0956); all three implementations fixed the same day.
+- **Go implementation alignment**: `knownConstraintTypes` tightened to
+  `{max_rows, time, network}` (indexed by `parts[1]`), matching Python/TS; the
+  `decide-026` trap (op id grammar evaluated before the grant path) closed by
+  pinning the vector with a valid op; `Authorize` now propagates
+  `err.Error()` for `invalid_constraint`/`unknown_constraint` and collects
+  unresolved in sorted order.
+- **Python**: `intersect_value` gained a bool guard so `True` never compares as
+  `1` (`no_overlap` on bool-vs-number) — read-only code paths were already exact
+  (params-022/023).
+- **TypeScript**: removed two now-wrong NOTES (the Go "known set" divergence note
+  and the layer-6 ordering note); a duplicate `canonicalStringify` export that
+  shadowed the module-level one was deleted and the `validateParams` calls
+  re-added to `entails`.
+- **Corpus 83 → 95**: `intersect-005` time window → array form; new
+  `syntax-007/008/009` and `decide-019..027` (unresolved, invalid_constraint,
+  op-absent max_rows, three-segment window, §3 scheme pins).  Schema extended
+  with `expect.unresolved`.
+- **Property wall 524 → 1184**: generator PARAMS grew to 14 shapes (nested
+  `profile`/`filters`, `flags admin true vs 1`, two-key vs single-key dicts) →
+  regenerated `property-cases.json`; all three 1184/1184, 0 failures.  Diag
+  counters verified equal with `go test -count=1` (869/860 in all three; the
+  addendum's cache lesson holds on this corpus too).
+- **Known parity**: py/ts runner output diff-clean byte-for-byte; Go matches on
+  every asserted field (its summary lines use different dash counts — cosmetic).
+
+## rev 12 Changes (2026-09-12) — CLC-1.3 Closeout
+
+The CLC-1.3 revision (additive) removes the last "pseudo-allow" narrative and
+adds multi-grant aggregation:
+
+- **Verbatim removal / `allow_unresolved` verdict**: the informational
+  `verbatim` field was dropped from all three implementations; the §8.4
+  residual-obligation channel is now the single `verdict:'allow_unresolved'` +
+  `unresolved:[...]` surface (rev spec §8.4).  Corpus re-pinned: `decide-019`
+  (cross-midnight single window → `invalid_constraint`), `decide-020` and
+  `decide-024` (network/time recognized-but-unevaluated →
+  `allow_unresolved`).  Schema verdict enum gained `allow_unresolved`.
+- **Constraint identity = (scheme,type) pair**: recognized set keyed on
+  `scheme:type`; only `varwof/constraint-v1` declares core types.  A same-name
+  constraint under any other scheme (`foo/db-v1:max_rows`) is
+  `unknown_constraint`.  Go/Python/TS each got a defensive identity gate in
+  `CheckConstraint`/`check_constraint` and the same "identity first" order in
+  validation.
+- **Same-day time-window grammar**: single segments may no longer cross
+  midnight (must be split); `end:"00:00"` stays reserved as next-day midnight;
+  full-day `00:00→00:00` invalid; segments ascending and non-overlapping
+  (touching allowed).  Grammar identical across the three validators
+  (verified against the CLC-1.3 vectors).
+- **`{}` ≡ absent**: an explicit empty grant params object is unconstrained —
+  no key closure, any op params allowed (`decide-028`).  `entails` and
+  `paramsSubset`/`params_subset` aligned; property closure probe now skips
+  empty-params merged grants (841 probes, was 860).
+- **§9.3 multi-grant aggregation**: new `AuthorizeSet(grants, op)` — any
+  covering-and-allowing grant authorizes (union); residual obligations union
+  across covering-and-allowing grants; when nothing allows, the first covering
+  grant's params/constraint reason surfaces in input order.
+  `decide-029` (any-allow) and `decide-030` (all-deny, first reason) pin it;
+  vector type gained `"multi": true`.
+- **Corpus 95 → 98** (syntax 9 / entail 37 / intersect 14 / decide 38);
+  Go/Python/TS each 98/98 with reason + unresolved assertions enforced; P11
+  property 1184/1184, 0 failures everywhere, counters 869/841 in all three.
 
 ## rev 10 Changes (2026-09-11) — TypeScript Third Implementation
 
@@ -302,7 +395,7 @@ compare by exact equality; new code `not_in_enum`; empty `[]` →
 - File: `semantics/semantics.go`
 - CLI: `cmd/vectors-run/main.go`
 - Module: `github.com/varwof/register/semantics`
-- Known constraints: `max_rows`, `time:window`, `network:cidr`
+- Known constraints: `max_rows`, `time`, `network` (indexed by `parts[1]`, rev CLC-1.2)
 - Test: `go test ./...` green (semantics 16 tests); `gofmt -l` clean; `go vet` clean
 
 ### Python (aic-capability-demo/clc_semantics)
@@ -323,14 +416,32 @@ compare by exact equality; new code `not_in_enum`; empty `[]` →
 ### Semantic Differences
 
 None on the conformance surface: all three implementations produce identical
-verdicts **and reason codes** for all 76 vectors, and all match the vector
-expectations; the shared P11 property wall passes in all three. Four
-corpus-unexercised corner cases where Go/Python/TS make different (all-spec-or-
-all-defensible) choices are documented in `clc-v1-ambiguities.md §6`; TS picks
-the spec reading, and no existing vector or property case distinguishes them.
+verdicts **and reason codes** for all 98 vectors, and all match the vector
+expectations; the shared P11 property wall (1184 cases) passes in all three.
+The four corpus-unexercised corner cases recorded in `clc-v1-ambiguities.md §6`
+(2026-09-11) were resolved and pinned by new vectors during the CLC-1.2 sweep —
+Boolean grant values are exact (params-022/023), op-id wildcards propagate the
+concrete layer-1 code (decide-018), the known-constraint set is
+`{max_rows, time, network}` with a value grammar (decide-019..024,027), and
+`null` precedes presence (params-024).  The CLC-1.3 closeout (rev 12) then
+removed the residual area: the `verbatim` field is gone (the
+`allow_unresolved` verdict is the only residual channel) and the natural
+multi-grant question ("same operation, several grants") is now defined by §9.3
+aggregation with vectors (decide-028..030).
 
 ## Revision History
 
+- 2026-09-12 rev 12: CLC-1.3 closeout — `allow_unresolved` independent verdict
+  (verbatim field removed), (scheme,type) constraint identity, same-day
+  time-window grammar, `{}` ≡ absent params, §9.3 multi-grant aggregation
+  (`AuthorizeSet`); corpus 95 → 98 (decide 35 → 38); Go/Python/TS 98/98 and
+  1184/1184 (0 failures), counters 869/841 in all three (`-count=1`).
+- 2026-09-12 rev 11: CLC-1.2 sweep — `unresolved` channel (allow-side additive
+  field), `invalid_constraint` value grammar, §3 scheme grammar, max_rows
+  op-absent fail-closed, dict key-set P11 rule; corpus 83 → 95 (syntax 9, entail
+  37, intersect 14, decide 35); property wall 524 → 1184; Go known-set and
+  `authorize`-collapse alignments; TS NOTE cleanups. Go/Python/TS 95/95 and
+  1184/1184 (0 failures), counters 869/860 in all three (`-count=1`).
 - 2026-09-11 rev 10: TypeScript third implementation (`ts/clc_semantics.ts`,
   `ts/vectors-run.ts`, `ts/property.ts`, zero-dep Node) written from the spec.
   Go/Python/TS each 76/76 Reason-fail 0 at the time; P11 property 524 cases, 0 failures
@@ -376,7 +487,7 @@ the spec reading, and no existing vector or property case distinguishes them.
   fixed params-007 reason; documented 6 pre-existing reason-only divergences.
   Count 46 → 52.
 - 2026-09-10 rev 2: added decide-009 (issue 2); unified notation notes
-  (issue 1); wildcard v1/v2 boundary record (issue 3); EMILIA wording fix
+  (issue 1); wildcard v1/v2 boundary record (issue 3); wording fix
   (issue 4); Go runner default path fix + appendix mapping note (issue 5).
   Count 45 → 46.
 
@@ -433,6 +544,11 @@ Still open: the TypeScript `validateRawParams` is a single-pass scan, so for
 "over-limit + duplicate key / bad number" combinations it reports the
 dup/number code before the size code, which is the reverse of §6.2 item 5.  The
 corpus holds single-fault inputs only, so no runner currently catches it.
+
+> **Update (2026-09-12, rev 12)**: the multi-fault gap was closed that same
+> evening — `params-025/-026/-027` pin the §6.2 item 5 order and `ts`
+> `validateRawParams` is now a two-pass scan (size/depth before dup/number).
+> Current corpus is 98 vectors and 1184 property cases (see rev 12 above).
 
 See also `varwof/capability` → `docs/design-notes.md` for the English decision record
 (why each rule was chosen, what was rejected, and the probe batch that found three

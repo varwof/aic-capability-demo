@@ -1,11 +1,16 @@
 # Varwof AIC Demo — Reproducible Test Guide
 
-> Target reader: independent reviewer (Iman / EMILIA). This guide reproduces
-> the full AIC pipeline: AI-generated least-privilege capability claims →
+> Target reader: an independent reviewer reproducing the pipeline end to end.
+> It covers the full AIC pipeline: AI-generated least-privilege capability claims →
 > registry validation → Principal signs DelegationAuthorization → CA issues
 > AIC → gateway enforces capability on Bearer AIC-JWT → LLM backend.
 >
-> Date: 2026-09-01. Verified end-to-end with real DeepSeek API.
+> Status: dated end-to-end verification record, 2026-09-01. Verified with the
+> real DeepSeek API against the commits listed in §2; the entries marked
+> `main` have since moved.
+
+> Origin: prepared 2026-09-02 as a walkthrough for the EMILIA review; renamed
+> 2026-09-12 so it reads as a general independent-reviewer guide.
 
 ## 1. Architecture
 

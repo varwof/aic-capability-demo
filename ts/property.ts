@@ -125,8 +125,10 @@ function main(): number {
             }
         });
 
-        // Closure applies to the effective grant only.
-        if (merged.id && merged.params != null) {
+        // Closure applies to the effective grant only.  An EMPTY params
+        // object is unconstrained under rev CLC-1.3 ({} ≡ absent), so key
+        // closure does not apply to it either.
+        if (merged.id && merged.params != null && Object.keys(merged.params).length > 0) {
             const probe: Grant = { id: merged.id, params: { ...merged.params, clc_undeclared_probe: 'x' } };
             const decision = authorize(merged, probe);
             if (canonicalReason(decision.reason ?? '') !== 'undeclared_param') {

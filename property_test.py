@@ -101,8 +101,10 @@ def main():
                                 % (case["id"], case.get("note", ""), json.dumps(merged, sort_keys=True),
                                    i, json.dumps(src, sort_keys=True)))
 
-        # Closure applies to the effective grant only.
-        if merged.get("id") and merged.get("params") is not None:
+        # Closure applies to the effective grant only.  An EMPTY params
+        # object is unconstrained under rev CLC-1.3 ({} ≡ absent), so key
+        # closure does not apply to it either.
+        if merged.get("id") and merged.get("params") is not None and len(merged["params"]) > 0:
             probe = {"id": merged["id"],
                      "params": dict(merged["params"], clc_undeclared_probe="x")}
             decision = authorize(merged, probe)

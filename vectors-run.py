@@ -17,6 +17,7 @@ from clc_semantics import (
     validate_capability_id,
     validate_raw_params,
     revision_compatible,
+    authorize_set,
     CLCError,
 )
 
@@ -112,21 +113,37 @@ def run_vector(v: dict) -> dict:
         grant = v.get("grant")
         op = v.get("request")
 
-        others = v.get("others", [])
-        if others:
-            try:
-                grant = intersect([grant] + others)
-            except CLCError as e:
-                r["got"] = "deny"
-                r["reason"] = canonical_reason(str(e))
-                r["pass"] = r["got"] == r["expect"] and r["reason"] == r["exp_reason"]
-                return r
-
-        # authorize() is fail-closed on absent/empty grant (§9 layer 10).
-        result = authorize(grant, op)
+        result = None
+        # Multi-grant §9.3 aggregation (rev CLC-1.3): grant + others form the
+        # authorization grant SET; any-allowing grant authorizes (union), and
+        # residual obligations union across covering-and-allowing grants.
+        if v.get("multi"):
+            grants = [grant] + v.get("others", [])
+            result = authorize_set(grants, op)
+        else:
+            others = v.get("others", [])
+            if others:
+                try:
+                    grant = intersect([grant] + others)
+                except CLCError as e:
+                    r["got"] = "deny"
+                    r["reason"] = canonical_reason(str(e))
+                    r["pass"] = r["got"] == r["expect"] and r["reason"] == r["exp_reason"]
+                    return r
+            # authorize() is fail-closed on absent/empty grant (§9 layer 10).
+            result = authorize(grant, op)
         r["got"] = result["verdict"]
         r["reason"] = canonical_reason(result.get("reason", ""))
+        # §8.4 residual obligations: asserted when the vector declares them
+        # (rev CLC-1.2).  Both sides sorted+deduped before comparison.
         r["pass"] = r["got"] == r["expect"] and r["reason"] == r["exp_reason"]
+        if "unresolved" in expect:
+            want = sorted(expect["unresolved"] or [])
+            have = sorted(result.get("unresolved") or [])
+            if want != have:
+                note = f"unresolved want={want} got={have}"
+                r["note"] = note
+                r["pass"] = False
 
     return r
 

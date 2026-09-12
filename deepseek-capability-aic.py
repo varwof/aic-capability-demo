@@ -54,18 +54,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # checkout. The package is self-contained for capdata; register is only
 # needed for gen-capability and the AI prompt defaults.
 def _find_register():
-    for cand in (os.path.join(HERE, "..", "register"),
-                 "/home/varwof/src/github.com/register"):
-        if os.path.isdir(cand):
+    for cand in (os.environ.get("VARWOF_REGISTER", ""),
+                 os.path.join(HERE, "..", "register")):
+        if cand and os.path.isdir(cand):
             return os.path.normpath(cand)
-    return "/home/varwof/src/github.com/register"
+    raise SystemExit("register checkout not found: clone varwof/register as a "
+                     "sibling directory or set VARWOF_REGISTER=/path/to/register")
 REGISTER = _find_register()
 DEFAULT_SCHEME = os.path.join(
     REGISTER, "testdata", "capability", "std", "database-v1", "v1.json")
 DEFAULT_PROMPT = os.path.join(REGISTER, "AI_PROMPT_EN.md")
 DEFAULT_SCHEMES = os.path.join(HERE, "capdata")
-if not os.path.isdir(DEFAULT_SCHEMES):
-    DEFAULT_SCHEMES = "/home/varwof/src/github.com/capability/data"
 
 
 def load_text(path):
@@ -169,7 +168,7 @@ def main():
     ap.add_argument("--agent-id", default="agent-" + str(int(time.time())))
     ap.add_argument("--scheme", default=DEFAULT_SCHEME)
     ap.add_argument("--prompt", default=DEFAULT_PROMPT)
-    ap.add_argument("--schemes-dir", default=DEFAULT_SCHEMES_DIR)
+    ap.add_argument("--schemes-dir", default=DEFAULT_SCHEMES)
     ap.add_argument("--grants", default="std/database-v1:query:SELECT")
     ap.add_argument("--ou", default="gateway:llm")
     ap.add_argument("--principal-cert", default="")

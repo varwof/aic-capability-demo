@@ -15,7 +15,7 @@ infrastructure, and MCP tool calls. Everything is reproducible and auditable.
 git clone https://github.com/varwof/aic-capability-demo.git && cd aic-capability-demo
 # 1) Build all binaries from pinned commits (one command)
 ./build.sh && export PATH="$PWD/bin:$PATH"
-# 2) Bootstrap a CA, issue a principal certificate (IMAN-TEST-GUIDE §6)
+# 2) Bootstrap a CA, issue a principal certificate (REVIEWER-GUIDE §6)
 # 3) Generate the gateway config from your CA-issued certs
 ./setup.sh --gateway-cert gw.pem --gateway-key gw.key --jwt-ca issuing-ca.pem
 # 4) Start backends + gateway, run any scenario
@@ -57,7 +57,7 @@ python3 scenario-demo.py --scenario mcp --principal-cert principal.pem \
 
 | File | Purpose |
 |---|---|
-| `IMAN-TEST-GUIDE.md` | Full English walkthrough (build/CA/issue/gateway/matrices) |
+| `REVIEWER-GUIDE.md` | Independent-reviewer walkthrough (build/CA/issue/gateway/matrices); verified 2026-09-01 |
 | `QUICKSTART.md` | Two-command quickstart + per-scenario matrices |
 | `deepseek-capability-aic.py` | Database scenario end-to-end (DeepSeek/mock -> validate -> AIC) |
 | `wallet-demo.py` | Wallet scenario end-to-end + 6-case matrix |
@@ -133,8 +133,9 @@ python3 vectors-run.py && python3 property_test.py
 ```
 
 Corpora (in `varwof/capability`, `data/_vectors/clc-v1/`): `vectors.json`
-(83 vectors), `property-cases.json` (524 deterministic P11 cases),
-`offline-vectors.json` (OCMP reference cases).
+(98 vectors, incl. the rev CLC-1.3 `allow_unresolved` verdict and §9.3
+multi-grant aggregation), `property-cases.json` (1184 deterministic P11
+cases), `offline-vectors.json` (OCMP reference cases).
 
 Why three: a language is only as strong as the agreement between independent
 interpreters, and the three disagreed on real inputs until 2026-09-11 — the Go

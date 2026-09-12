@@ -116,8 +116,11 @@ def main():
     print(f"== 1. gen-capability validation ({sc['scheme']}) ==")
     gen_cap = os.path.join(HERE, "gen-capability")
     if not os.path.exists(gen_cap):
-        for cand in (os.path.join(HERE, "..", "register", "cmd", "gen-capability"),
-                     "/home/varwof/src/github.com/register/cmd/gen-capability"):
+        _reg = os.environ.get("VARWOF_REGISTER", "")
+        _cands = [os.path.join(HERE, "..", "register", "cmd", "gen-capability")]
+        if _reg:
+            _cands.append(os.path.join(_reg, "cmd", "gen-capability"))
+        for cand in _cands:
             if os.path.isdir(cand):
                 gen_cap = "go run ./cmd/gen-capability"  # from register dir
                 break

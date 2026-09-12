@@ -30,7 +30,7 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SCHEMES = os.path.join(HERE, "capdata")
 if not os.path.isdir(DEFAULT_SCHEMES):
-    DEFAULT_SCHEMES = "/home/varwof/src/github.com/capability/data"
+    DEFAULT_SCHEMES = os.environ.get("VARWOF_CAPABILITY_DATA", DEFAULT_SCHEMES)
 
 
 def run(args, show=True):
@@ -111,8 +111,11 @@ def main():
     print("\n== 2. gen-capability validation (least privilege + version pinning) ==")
     gen_cap = os.path.join(HERE, "gen-capability")
     if not os.path.exists(gen_cap):
-        for cand in (os.path.join(HERE, "..", "register", "cmd", "gen-capability"),
-                     "/home/varwof/src/github.com/register/cmd/gen-capability"):
+        _reg = os.environ.get("VARWOF_REGISTER", "")
+        _cands = [os.path.join(HERE, "..", "register", "cmd", "gen-capability")]
+        if _reg:
+            _cands.append(os.path.join(_reg, "cmd", "gen-capability"))
+        for cand in _cands:
             if os.path.isdir(cand):
                 gen_cap = "go run ./cmd/gen-capability"  # from register dir
                 break

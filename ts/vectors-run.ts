@@ -9,6 +9,7 @@
 
 import {
     authorize,
+    authorizeSet,
     canonicalReason,
     canonicalStringify,
     entails,
@@ -32,8 +33,9 @@ interface Vector {
     grant?: Record<string, unknown> | null;
     request?: Record<string, unknown> | null;
     others?: Record<string, unknown>[];
+    multi?: boolean; // rev CLC-1.3: §9.3 grant-SET aggregation
     raw_params?: string;
-    expect: { verdict: string; reason?: string };
+    expect: { verdict: string; reason?: string; unresolved?: string[] };
     derivation?: string;
 }
 
@@ -148,23 +150,40 @@ function runVector(v: Vector): Result {
         let grant = v.grant as Grant | null | undefined;
         const op = v.request as Operation | null | undefined;
 
-        const others = (v.others ?? []) as Grant[];
-        if (others.length > 0) {
-            try {
-                grant = intersect([grant ?? ({ id: '' } as Grant), ...others]);
-            } catch (e) {
-                r.got = 'deny';
-                r.reason = canonicalReason((e as SemanticsError).message);
-                r.pass = r.got === r.expect && r.reason === r.expReason;
-                return r;
+        let result: Decision;
+        // Multi-grant §9.3 aggregation (rev CLC-1.3): grant + others form the
+        // authorization grant SET; any-allowing grant authorizes (union), and
+        // residual obligations union across covering-and-allowing grants.
+        if ((v.multi as boolean) === true) {
+            result = authorizeSet([grant ?? null, ...((v.others ?? []) as Grant[])], op);
+        } else {
+            const others = (v.others ?? []) as Grant[];
+            if (others.length > 0) {
+                try {
+                    grant = intersect([grant ?? ({ id: '' } as Grant), ...others]);
+                } catch (e) {
+                    r.got = 'deny';
+                    r.reason = canonicalReason((e as SemanticsError).message);
+                    r.pass = r.got === r.expect && r.reason === r.expReason;
+                    return r;
+                }
             }
+            // authorize() is fail-closed on absent/empty grant (§9 layer 10).
+            result = authorize(grant, op);
         }
-
-        // authorize() is fail-closed on absent/empty grant (§9 layer 10).
-        const result = authorize(grant, op);
         r.got = result.verdict;
         r.reason = canonicalReason(result.reason ?? '');
         r.pass = r.got === r.expect && r.reason === r.expReason;
+        // §8.4 residual obligations: asserted when the vector declares them
+        // (rev CLC-1.2).  Both sides sorted+deduped before comparison.
+        if ('unresolved' in v.expect) {
+            const want = [...(v.expect.unresolved ?? [])].sort();
+            const have = [...(result.unresolved ?? [])].sort();
+            if (JSON.stringify(want) !== JSON.stringify(have)) {
+                r.note = `unresolved want=${JSON.stringify(want)} got=${JSON.stringify(have)}`;
+                r.pass = false;
+            }
+        }
         return r;
     }
 

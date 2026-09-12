@@ -28,8 +28,15 @@ export interface Operation {
 }
 
 export interface Decision {
-    verdict: 'allow' | 'deny';
+    verdict: 'allow' | 'deny' | 'allow_unresolved';
     reason?: string;
+    // Unresolved lists recognized-but-unevaluated constraints carried on an
+    // allow_unresolved verdict (§8.4 residual-obligation channel, rev
+    // CLC-1.3): non-empty means the consumer must evaluate/confirm each
+    // constraint before acting, else deny (AAC §6.6).  Empty/absent on deny
+    // and on a fully-evaluated allow.  Ordered deterministically
+    // (sorted, deduped).
+    unresolved?: string[];
 }
 
 export interface MatchResult {
@@ -48,17 +55,31 @@ export class SemanticsError extends Error {
 
 // Known constraint types for v1, read from the §8.1 grammar scheme:type[:params]
 // (type = the second ':'-delimited segment).  Unknown types fail closed.
-// NOTE: Go's known set is {max_rows, time:window, network:cidr} but read via
-// parts[1], which per this grammar makes Go reject time:window/network:cidr as
-// unknown; the corpus only exercises max_rows and unknown types, so the sets
-// behave identically there.  See ambiguities.md.
+// rev CLC-1.3: core recognition is by (scheme,type) PAIR — only
+// `varwof/constraint-v1` declares core-recognized types; any other scheme's
+// constraint (including e.g. `foo/db-v1:max_rows`) fails closed with
+// unknown_constraint.  The type name alone never selects an evaluator.
+export const RESERVED_SCHEME = 'varwof/constraint-v1';
 export const KNOWN_CONSTRAINT_TYPES = new Set(['max_rows', 'time', 'network']);
+// (scheme,type) pairs the v0 core recognizes: only the reserved scheme.
+export const RECOGNIZED_CONSTRAINT_IDENTITIES = new Set(
+    [...KNOWN_CONSTRAINT_TYPES].map((t) => `${RESERVED_SCHEME}:${t}`),
+);
 
 // CLC-v1 §12.1: the language revision this implementation declares.
-export const CLC_REVISION = 'CLC-1.1';
+// (rev CLC-1.3 · 2026-09-12: CLC-1.3 is additive — `allow_unresolved`
+// verdict + §9.3 identity/aggregation clarifications — so CLC-1.2/1.1
+// inputs still read fine.)
+export const CLC_REVISION = 'CLC-1.3';
 // §6.2 step 4: bounds on the JCS-serialized params form.
 export const MAX_PARAMS_SERIALIZED_BYTES = 512;
 export const MAX_PARAMS_NESTING = 32;
+
+// Verdicts (rev CLC-1.3: allow_unresolved is the independent verdict for
+// recognized-but-unevaluated constraint obligations, §8.4).
+export const VERDICT_ALLOW = 'allow';
+export const VERDICT_DENY = 'deny';
+export const VERDICT_ALLOW_UNRESOLVED = 'allow_unresolved';
 
 // isPlainObject: value is a JSON object, not an array, not null.
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -107,19 +128,49 @@ export function validateCapabilityId(id?: string | null): void {
     if (parts.length < 2) {
         throw new SemanticsError('invalid_capability_id');
     }
+    // §3 scheme grammar: vendor "/" product "-v" major (rev CLC-1.2).
+    if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9-]+-v[0-9]+$/.test(parts[0])) {
+        throw new SemanticsError('invalid_capability_id');
+    }
 }
 
-// validateParams: reject null parameter values (CLC-v1 §5.2).  The offending
-// key is carried as a ": <detail>" suffix (§9.4).
+// validateParams: reject null parameter values (CLC-v1 §5.2) and apply the
+// §6.2 step 4 caps to the decoded-object path (§6.2 step 6, rev CLC-1.2):
+// the depth cap uses the decoded structure, the size cap a canonical
+// (sorted-key, compact) serialization.  Caps resolve before the null check
+// (layer order).  The offending key is carried as a ": <detail>" suffix
+// (§9.4).
 export function validateParams(params?: Record<string, unknown> | null): void {
     if (!params) {
         return;
+    }
+    if (paramsDepth(params, 1) > MAX_PARAMS_NESTING) {
+        throw new SemanticsError('invalid_params_size');
+    }
+    if (canonicalStringify(params).length > MAX_PARAMS_SERIALIZED_BYTES) {
+        throw new SemanticsError('invalid_params_size');
     }
     for (const [k, v] of Object.entries(params)) {
         if (v === null) {
             throw new SemanticsError(`invalid_params_null: ${k}`);
         }
     }
+}
+
+// paramsDepth: nesting depth of a decoded params value, counting objects and
+// arrays with the params object as level 1 (§6.2 step 4).
+function paramsDepth(v: unknown, depth: number): number {
+    let max = depth;
+    if (Array.isArray(v)) {
+        for (const c of v) {
+            max = Math.max(max, paramsDepth(c, depth + 1));
+        }
+    } else if (isPlainObject(v)) {
+        for (const c of Object.values(v)) {
+            max = Math.max(max, paramsDepth(c, depth + 1));
+        }
+    }
+    return max;
 }
 
 // Significant decimal digits of a numeric literal (§6.2 step 3: > 17 rejects).
@@ -616,7 +667,9 @@ export function paramsSubset(
     opParams?: Record<string, unknown> | null,
     grantParams?: Record<string, unknown> | null,
 ): [boolean, string] {
-    if (grantParams == null) {
+    if (grantParams == null || Object.keys(grantParams).length === 0) {
+        // Rev CLC-1.3 (§9.3): an absent OR empty params object is
+        // unconstrained — the empty map declares no keys, so no key closure.
         return [true, ''];
     }
     if (opParams == null) {
@@ -692,15 +745,16 @@ export function entails(grant: Grant, op: Operation): MatchResult {
         return { entails: false, reason: idReason };
     }
 
-    // §6.3 step 3: grant params absent → true (unconstrained).
-    if (grant.params == null) {
+    // §6.3 step 3: grant params absent OR empty → true (unconstrained; rev
+    // CLC-1.3 §9.3 makes {} ≡ absent).
+    if (grant.params == null || Object.keys(grant.params).length === 0) {
         return { entails: true };
     }
 
     // §9.3 layer 6 resolves before presence (layer 7): null values in either
     // side fail before an absent operation params object is judged
-    // params_missing. (Go's Entails checks the op-absent case first; the
-    // corpus does not exercise the conjunction.)
+    // params_missing (validateParams also applies the §6.2 step 4 object-path
+    // size/depth caps, rev CLC-1.2).
     try {
         validateParams(grant.params);
     } catch (e) {
@@ -739,11 +793,18 @@ function intersectValue(a: unknown, b: unknown): unknown {
         return result;
     }
     if (isPlainObject(a) && isPlainObject(b)) {
+        // Object values intersect per shared key, and only when the key sets
+        // are identical (rev CLC-1.2): a shared-keys result would drop a key
+        // the other source constrains, so it is not covered by every source
+        // (P11 — composition narrows only).  Differing key sets deny
+        // no_overlap.
+        const aKeys = Object.keys(a);
+        if (aKeys.length !== Object.keys(b).length || !aKeys.every((k) => k in b)) {
+            throw new SemanticsError('no_overlap');
+        }
         const result: Record<string, unknown> = {};
-        for (const k of Object.keys(a)) {
-            if (k in b) {
-                result[k] = intersectValue(a[k], b[k]);
-            }
+        for (const k of aKeys) {
+            result[k] = intersectValue(a[k], b[k]);
         }
         if (Object.keys(result).length === 0) {
             throw new SemanticsError('no_overlap');
@@ -829,35 +890,234 @@ export function intersect(grants: Grant[]): Grant {
     return result;
 }
 
-// validateConstraint checks if a constraint is known (§8.3 grammar:
-// scheme:type[:params]; a known type is the second ':'-delimited segment).
+// validateConstraint checks a constraint against §8.1's type×value grammar
+// (rev CLC-1.2): an unrecognized type → unknown_constraint; a recognized
+// type whose value is out of grammar → invalid_constraint.
 export function validateConstraint(c: string): void {
     const parts = c.split(':');
-    if (parts.length < 2) {
+    if (parts.length < 2 || !RECOGNIZED_CONSTRAINT_IDENTITIES.has(`${parts[0]}:${parts[1]}`)) {
         throw new SemanticsError('unknown_constraint');
     }
-    if (!KNOWN_CONSTRAINT_TYPES.has(parts[1])) {
-        throw new SemanticsError('unknown_constraint');
+    switch (parts[1]) {
+        case 'max_rows':
+            // Strict JSON non-negative integer, exactly one token (§8.1
+            // value-grammar table).
+            if (parts.length !== 3 || !isStrictJSONInteger(parts[2])) {
+                throw new SemanticsError(`invalid_constraint: ${c}`);
+            }
+            break;
+        case 'time': {
+            // Value = JSON array of ≤32 {start,end} UTC daily windows (§8.1).
+            const joined = constraintParams(c);
+            if (!joined.startsWith('window:') || !validTimeWindowJSON(joined.slice('window:'.length))) {
+                throw new SemanticsError(`invalid_constraint: ${c}`);
+            }
+            break;
+        }
+        case 'network': {
+            // Value = JSON array of ≤32 CIDR strings (§8.1).
+            const joined = constraintParams(c);
+            if (!joined.startsWith('cidr:') || !validCIDRListJSON(joined.slice('cidr:'.length))) {
+                throw new SemanticsError(`invalid_constraint: ${c}`);
+            }
+            break;
+        }
     }
 }
 
-// checkConstraint evaluates a known constraint against an operation.
+// checkConstraint evaluates a known constraint against an operation (§8.1).
 // §8.1 defines the v1 known types; only max_rows has an auth-side evaluator
-// here (time/network are accepted as known but have no normative evaluator in
-// §8.1 — the corpus only exercises max_rows and unknown types).
+// here (time/network are recognized-but-unevaluated — they surface via the
+// decision's unresolved field, §8.4).  rev CLC-1.2: max_rows uses a strict
+// integer and fails closed when the op carries no max_rows value.
 export function checkConstraint(c: string, op: Operation): string | null {
     const parts = c.split(':');
+    // Defensive identity gate (rev CLC-1.3): validateConstraint is
+    // authoritative and rejects non-core schemes first, so this is
+    // unreachable via authorize.
+    if (!RECOGNIZED_CONSTRAINT_IDENTITIES.has(`${parts[0]}:${parts[1]}`)) {
+        return null;
+    }
     const constraintType = parts[1];
-    if (constraintType === 'max_rows' && parts.length >= 3) {
-        const maxVal = parseFloat(parts[2]);
-        if (!Number.isNaN(maxVal)) {
-            const rows = op.params?.max_rows;
-            if (typeof rows === 'number' && rows > maxVal) {
-                return 'max_rows:violated';
-            }
+    if (constraintType === 'max_rows') {
+        if (parts.length !== 3 || !isStrictJSONInteger(parts[2])) {
+            // Unreachable via authorize (validateConstraint rejects the grant
+            // with invalid_constraint first); defensive no-op.
+            return null;
+        }
+        const maxVal = parseInt(parts[2], 10);
+        const rows = op.params?.max_rows;
+        if (rows === undefined || rows === null) {
+            // Op-absent max_rows → fail closed (§8.1 value-grammar table).
+            return 'max_rows:violated';
+        }
+        if (typeof rows === 'number' && rows > maxVal) {
+            return 'max_rows:violated';
         }
     }
     return null;
+}
+
+// coreEvaluatesConstraint reports whether the v1 core has an evaluator for a
+// constraint's type (§8.1).  Only max_rows is core-evaluated; time/network
+// are recognized-but-unevaluated and surface via unresolved (§8.4).
+function coreEvaluatesConstraint(c: string): boolean {
+    const parts = c.split(':');
+    if (parts.length < 2) {
+        return false;
+    }
+    return parts[0] === RESERVED_SCHEME && parts[1] === 'max_rows';
+}
+
+// constraintParams: a constraint's value part — everything after
+// `scheme:type:` — with JSON colons preserved (rejoined from the colon-split
+// parts; rev CLC-1.2 fixes the kind of corruption that chopped window arrays
+// on inner colons).  Callers strip the type-specific domain crumb
+// (`window:` / `cidr:`).
+function constraintParams(c: string): string {
+    const parts = c.split(':');
+    if (parts.length < 3) {
+        return '';
+    }
+    return parts.slice(2).join(':');
+}
+
+// isStrictJSONInteger: canonical JSON non-negative integer — digits only, no
+// sign, no fraction, no exponent, no leading zero (rev CLC-1.2 value
+// grammar).  Deliberately stricter than parseFloat, which accepts "10abc"
+// and "1e3".
+function isStrictJSONInteger(s: string): boolean {
+    if (s === '') {
+        return false;
+    }
+    if (s.length > 1 && s[0] === '0') {
+        return false;
+    }
+    return /^[0-9]+$/.test(s);
+}
+
+const MAX_TIME_WINDOWS = 32;
+const MAX_CIDR_LIST = 32;
+const TIME_OF_DAY_RE = /^([01]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/;
+
+// validTimeWindowJSON validates the time constraint's value grammar (§8.1,
+// rev CLC-1.3): a non-empty JSON array of ≤32 objects, each exactly
+// {start,end} of a time-of-day (HH:MM[:SS]) treated as UTC, daily-repeating.
+// Each segment is SAME-DAY: startSod < endSod where the reserved end "00:00"
+// denotes next-day midnight (86400s) — a single segment may not cross
+// midnight (22:00→06:00 is invalid and must be split), the full-day segment
+// 00:00→00:00 is invalid, and the list must be ascending and non-overlapping
+// (touching allowed).
+function validTimeWindowJSON(raw: string): boolean {
+    let segments: unknown;
+    try {
+        segments = JSON.parse(raw);
+    } catch (e) {
+        return false;
+    }
+    if (!Array.isArray(segments) || segments.length === 0 || segments.length > MAX_TIME_WINDOWS) {
+        return false;
+    }
+    let prevEnd = -1;
+    for (const s of segments) {
+        if (!isPlainObject(s)) {
+            return false;
+        }
+        const keys = Object.keys(s).sort();
+        if (keys.length !== 2 || keys[0] !== 'end' || keys[1] !== 'start') {
+            return false;
+        }
+        const start = s['start'];
+        const end = s['end'];
+        if (typeof start !== 'string' || typeof end !== 'string') {
+            return false;
+        }
+        if (!TIME_OF_DAY_RE.test(start) || !TIME_OF_DAY_RE.test(end)) {
+            return false;
+        }
+        const startSod = secondsOfDay(start);
+        let endSod = secondsOfDay(end);
+        if (end === '00:00') {
+            endSod = 86400; // reserved: next-day midnight
+        }
+        if (startSod >= endSod) {
+            return false; // same-day start before end
+        }
+        if (start === '00:00' && end === '00:00') {
+            return false; // full-day segment is invalid
+        }
+        if (prevEnd >= 0 && startSod < prevEnd) {
+            return false; // not ascending / overlapping (touching allowed)
+        }
+        prevEnd = endSod;
+    }
+    return true;
+}
+
+// secondsOfDay converts an HH:MM[:SS] string to seconds since midnight.
+function secondsOfDay(t: string): number {
+    const p = t.split(':').map((x) => parseInt(x, 10));
+    const s = p.length === 3 ? p[2] : 0;
+    return p[0] * 3600 + p[1] * 60 + s;
+}
+
+const IPV4_CIDR_RE = /^([0-9]{1,3}\.){3}[0-9]{1,3}\/([0-9]|[12][0-9]|3[0-2])$/;
+const IPV6_SHAPE_RE = /^[0-9a-fA-F:]+$/;
+
+function validIPv4Octets(ip: string): boolean {
+    for (const p of ip.split('.')) {
+        const n = Number(p);
+        if (!Number.isInteger(n) || n < 0 || n > 255) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// validCIDRString validates a numeric CIDR string (shape-only, §8.1 value
+// grammar; the core does not evaluate network constraints — that is the
+// scheme's job per §11).  Plugs the stdlib-IP-parse gap: parsed entirely by
+// hand so the Go/Python/TS accept sets stay identical.
+function validCIDRString(s: string): boolean {
+    const slash = s.lastIndexOf('/');
+    if (slash <= 0 || slash === s.length - 1) {
+        return false;
+    }
+    const ipPart = s.slice(0, slash);
+    const prefix = s.slice(slash + 1);
+    if (!isStrictJSONInteger(prefix)) {
+        return false;
+    }
+    const mask = parseInt(prefix, 10);
+    if (mask < 0 || mask > 128) {
+        return false;
+    }
+    if (ipPart.includes(':')) {
+        if (mask > 128) {
+            return false;
+        }
+        // Shape-only: allow "::"-compressed forms; reject a lone trailing ":".
+        return IPV6_SHAPE_RE.test(ipPart) && !(ipPart.endsWith(':') && !ipPart.endsWith('::'));
+    }
+    if (mask > 32) {
+        return false;
+    }
+    return IPV4_CIDR_RE.test(s) && validIPv4Octets(ipPart);
+}
+
+// validCIDRListJSON validates the network constraint's value grammar: a
+// non-empty JSON array of ≤32 numeric CIDR strings.
+function validCIDRListJSON(raw: string): boolean {
+    let list: unknown;
+    try {
+        list = JSON.parse(raw);
+    } catch (e) {
+        return false;
+    }
+    if (!Array.isArray(list) || list.length === 0 || list.length > MAX_CIDR_LIST) {
+        return false;
+    }
+    return list.every((e) => typeof e === 'string' && validCIDRString(e));
 }
 
 // isParamsLevelReason reports whether an entailment failure is a params-level
@@ -884,57 +1144,111 @@ export function authorize(
     effectiveGrant: Grant | null | undefined,
     op: Operation | null | undefined,
 ): Decision {
-    // Absent/empty grant: no capability to check → fail-closed (§9.3: drops
-    // straight to layer 10, even when the operation is also absent; D15).
-    if (effectiveGrant == null || !effectiveGrant.id) {
-        return { verdict: 'deny', reason: 'capability_not_authorized' };
+    // Single effective grant (§9.3 single-grant path).
+    return authorizeSet([effectiveGrant], op);
+}
+
+// authorizeSet evaluates the §9.3 multi-grant aggregation (rev CLC-1.3):
+//   - grants all absent (null or empty id) → deny capability_not_authorized
+//     (resolved before any layer check, per §9.3 pre-check);
+//   - otherwise operation layer-1 validation runs first (id, params null);
+//   - each grant whose id covers the operation is a covering grant; params
+//     (paramsSubset) then constraints (validate/check) are evaluated;
+//   - ANY covering grant whose params+constraints fully allow authorizes the
+//     operation (union semantics);
+//   - residual obligations (recognized-but-unevaluated constraints) union
+//     across the covering-and-allowing grants → allow_unresolved;
+//   - if no covering grant allows: params/constraint-level denials surface as
+//     the first covering grant's reason in canonical (input) order; grants
+//     that did not cover collapse to capability_not_authorized.
+export function authorizeSet(
+    grants: Array<Grant | null | undefined>,
+    op: Operation | null | undefined,
+): Decision {
+    if (!grants.some((g) => g && g.id)) {
+        return { verdict: VERDICT_DENY, reason: 'capability_not_authorized' };
     }
 
     // Absent operation → fail-closed (layer 1).
     if (op == null || !op.id) {
-        return { verdict: 'deny', reason: 'missing_capability_id' };
+        return { verdict: VERDICT_DENY, reason: 'missing_capability_id' };
     }
 
     // Step 1: validate the operation. The specific layer-1 code is propagated
-    // (missing / unsupported_wildcard / invalid_capability_id). NOTE: Go's
-    // Authorize collapses every op-ID validation error to
-    // invalid_capability_id; the corpus only exercises invalid_capability_id
-    // in decide vectors. See ambiguities.md.
+    // (missing / unsupported_wildcard / invalid_capability_id).
     try {
         validateCapabilityId(op.id);
     } catch (e) {
-        return { verdict: 'deny', reason: (e as SemanticsError).message };
+        return { verdict: VERDICT_DENY, reason: (e as SemanticsError).message };
     }
 
     // Validate operation params for null (§9.3 layer 6).
     try {
         validateParams(op.params);
     } catch (e) {
-        return { verdict: 'deny', reason: (e as SemanticsError).message };
+        return { verdict: VERDICT_DENY, reason: (e as SemanticsError).message };
     }
 
-    // Step 2: check entailment.
-    const result = entails(effectiveGrant, op);
-    if (!result.entails) {
-        const reason = result.reason ?? '';
-        if (isParamsLevelReason(reason)) {
-            return { verdict: 'deny', reason };
+    // Step 2/3 across the grant set.
+    const unresolved: string[] = [];
+    let denyReasonFirst = ''; // first covering-grant params/constraint-layer denial (input order)
+    let anyAllowed = false;
+    for (const g of grants) {
+        if (!g || !g.id) {
+            continue;
         }
-        return { verdict: 'deny', reason: 'capability_not_authorized' };
+        const result = entails(g, op);
+        if (!result.entails) {
+            const reason = result.reason ?? '';
+            if (isParamsLevelReason(reason) && !denyReasonFirst) {
+                denyReasonFirst = reason;
+            }
+            continue;
+        }
+
+        // Evaluate constraints (layer 11; §9 step 4, rev CLC-1.3).
+        let failed = false;
+        const pg: string[] = [];
+        for (const c of g.constraints ?? []) {
+            try {
+                validateConstraint(c);
+            } catch (e) {
+                failed = true;
+                if (!denyReasonFirst) {
+                    denyReasonFirst = (e as SemanticsError).message;
+                }
+                break;
+            }
+            const violation = checkConstraint(c, op);
+            if (violation) {
+                failed = true;
+                if (!denyReasonFirst) {
+                    denyReasonFirst = violation;
+                }
+                break;
+            }
+            if (!coreEvaluatesConstraint(c)) {
+                pg.push(c);
+            }
+        }
+        if (failed) {
+            continue;
+        }
+        // This covering grant authorizes the operation; keep scanning so the
+        // residual-obligation union is stable across grant order.
+        anyAllowed = true;
+        unresolved.push(...pg);
     }
 
-    // Step 3: evaluate constraints (layer 11).
-    for (const c of effectiveGrant.constraints ?? []) {
-        try {
-            validateConstraint(c);
-        } catch (e) {
-            return { verdict: 'deny', reason: (e as SemanticsError).message };
+    if (!anyAllowed) {
+        if (denyReasonFirst) {
+            return { verdict: VERDICT_DENY, reason: denyReasonFirst };
         }
-        const violation = checkConstraint(c, op);
-        if (violation) {
-            return { verdict: 'deny', reason: violation };
-        }
+        return { verdict: VERDICT_DENY, reason: 'capability_not_authorized' };
     }
-
-    return { verdict: 'allow' };
+    const uniq = [...new Set(unresolved)].sort();
+    if (uniq.length > 0) {
+        return { verdict: VERDICT_ALLOW_UNRESOLVED, unresolved: uniq };
+    }
+    return { verdict: VERDICT_ALLOW };
 }
