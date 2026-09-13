@@ -70,7 +70,7 @@ export const RECOGNIZED_CONSTRAINT_IDENTITIES = new Set(
 // (rev CLC-1.3 · 2026-09-12: CLC-1.3 is additive — `allow_unresolved`
 // verdict + §9.3 identity/aggregation clarifications — so CLC-1.2/1.1
 // inputs still read fine.)
-export const CLC_REVISION = 'CLC-1.3';
+export const CLC_REVISION = 'CLC-1.4';
 // §6.2 step 4: bounds on the JCS-serialized params form.
 export const MAX_PARAMS_SERIALIZED_BYTES = 512;
 export const MAX_PARAMS_NESTING = 32;
@@ -80,6 +80,12 @@ export const MAX_PARAMS_NESTING = 32;
 export const VERDICT_ALLOW = 'allow';
 export const VERDICT_DENY = 'deny';
 export const VERDICT_ALLOW_UNRESOLVED = 'allow_unresolved';
+
+// utf8Len returns the UTF-8 octet length of a string.  Section 6.2 measures
+// the canonical serialization in octets, never in UTF-16 code units.
+function utf8Len(s: string): number {
+    return new TextEncoder().encode(s).length;
+}
 
 // isPlainObject: value is a JSON object, not an array, not null.
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -140,6 +146,14 @@ export function validateCapabilityId(id?: string | null): void {
 // (sorted-key, compact) serialization.  Caps resolve before the null check
 // (layer order).  The offending key is carried as a ": <detail>" suffix
 // (§9.4).
+function rejectNonFinite(value: unknown): void {
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+        throw new SemanticsError('invalid_params_number');
+    }
+    if (Array.isArray(value)) { value.forEach(rejectNonFinite); }
+    else if (isPlainObject(value)) { Object.values(value).forEach(rejectNonFinite); }
+}
+
 export function validateParams(params?: Record<string, unknown> | null): void {
     if (!params) {
         return;
@@ -147,13 +161,14 @@ export function validateParams(params?: Record<string, unknown> | null): void {
     if (paramsDepth(params, 1) > MAX_PARAMS_NESTING) {
         throw new SemanticsError('invalid_params_size');
     }
-    if (canonicalStringify(params).length > MAX_PARAMS_SERIALIZED_BYTES) {
+    if (utf8Len(canonicalStringify(params)) > MAX_PARAMS_SERIALIZED_BYTES) {
         throw new SemanticsError('invalid_params_size');
     }
     for (const [k, v] of Object.entries(params)) {
         if (v === null) {
             throw new SemanticsError(`invalid_params_null: ${k}`);
         }
+        rejectNonFinite(v);
     }
 }
 
@@ -250,10 +265,12 @@ function scanRawParams(raw: string, strict: boolean): { value: unknown; compact:
                 return out;
             }
             if (ch === '\\') {
-                // Keep the escape pair in the compact-length accounting
-                // (Go re-marshals the string; Python counts raw in-string
-                // bytes; equivalent for ASCII corpus inputs).
-                compact += 2;
+                // Compact accounting keeps duplicate keys visible (the size
+                // rule runs before the duplicate-key check, §6.2 item 5) and
+                // counts octets: a \uXXXX escape contributes the UTF-8 octet
+                // length of the decoded character, other escapes stay escaped
+                // as JCS requires for control characters.
+                const escStart = i;
                 const next = t[i + 1] ?? '';
                 switch (next) {
                     case '"': out += '"'; break;
@@ -275,11 +292,15 @@ function scanRawParams(raw: string, strict: boolean): { value: unknown; compact:
                     }
                     default: fail();
                 }
+                const decodedChar = out.slice(-1);
+                compact += decodedChar.charCodeAt(0) < 0x20
+                    ? 2
+                    : utf8Len(decodedChar);
                 i += 2;
                 continue;
             }
             out += ch;
-            compact += 1;
+            compact += utf8Len(ch);
             i++;
         }
         fail();
@@ -951,7 +972,14 @@ export function checkConstraint(c: string, op: Operation): string | null {
             // Op-absent max_rows → fail closed (§8.1 value-grammar table).
             return 'max_rows:violated';
         }
-        if (typeof rows === 'number' && rows > maxVal) {
+        // Op-side value domain (rev CLC-1.4): a row count must be a finite
+        // non-negative integer; anything else cannot be shown to satisfy the
+        // constraint, so it fails closed instead of passing unchecked.
+        if (typeof rows !== 'number' || !Number.isFinite(rows) ||
+            !Number.isInteger(rows) || rows < 0) {
+            return 'max_rows:violated';
+        }
+        if (rows > maxVal) {
             return 'max_rows:violated';
         }
     }

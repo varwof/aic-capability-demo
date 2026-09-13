@@ -1,15 +1,15 @@
 # CLC-v1 Parity Report
 
-Date: 2026-09-12 (rev 12: CLC-1.3 closeout — 98 vectors; `allow_unresolved` independent verdict, (scheme,type) constraint identity, same-day time-window grammar, `{}`≡absent params, §9.3 multi-grant aggregation; Go/Python/TS parity)
+Date: 2026-09-12 (rev 12: CLC-1.3 closeout — 105 vectors; `allow_unresolved` independent verdict, (scheme,type) constraint identity, same-day time-window grammar, `{}`≡absent params, §9.3 multi-grant aggregation; Go/Python/TS parity)
 
 ## Summary
 
 | Metric | Value |
 |--------|-------|
 | Total vectors | 98 |
-| Go (register/semantics) | 98/98 PASS |
-| Python (aic-capability-demo/clc_semantics) | 98/98 PASS |
-| TypeScript (aic-capability-demo/ts/clc_semantics) | 98/98 PASS |
+| Go (register/semantics) | 105/105 PASS |
+| Python (aic-capability-demo/clc_semantics) | 105/105 PASS |
+| TypeScript (aic-capability-demo/ts/clc_semantics) | 105/105 PASS |
 | Verdict consistency | 100% (3 implementations) |
 | Reason-code consistency (cross-implementation) | 100% (3 implementations) |
 | Reason-code consistency (impl vs vector expectation) | **100%** |
@@ -163,7 +163,7 @@ adds multi-grant aggregation:
   `decide-029` (any-allow) and `decide-030` (all-deny, first reason) pin it;
   vector type gained `"multi": true`.
 - **Corpus 95 → 98** (syntax 9 / entail 37 / intersect 14 / decide 38);
-  Go/Python/TS each 98/98 with reason + unresolved assertions enforced; P11
+  Go/Python/TS each 105/105 with reason + unresolved assertions enforced; P11
   property 1184/1184, 0 failures everywhere, counters 869/841 in all three.
 
 ## rev 10 Changes (2026-09-11) — TypeScript Third Implementation
@@ -416,7 +416,7 @@ compare by exact equality; new code `not_in_enum`; empty `[]` →
 ### Semantic Differences
 
 None on the conformance surface: all three implementations produce identical
-verdicts **and reason codes** for all 98 vectors, and all match the vector
+verdicts **and reason codes** for all 105 vectors, and all match the vector
 expectations; the shared P11 property wall (1184 cases) passes in all three.
 The four corpus-unexercised corner cases recorded in `clc-v1-ambiguities.md §6`
 (2026-09-11) were resolved and pinned by new vectors during the CLC-1.2 sweep —
@@ -434,7 +434,7 @@ aggregation with vectors (decide-028..030).
 - 2026-09-12 rev 12: CLC-1.3 closeout — `allow_unresolved` independent verdict
   (verbatim field removed), (scheme,type) constraint identity, same-day
   time-window grammar, `{}` ≡ absent params, §9.3 multi-grant aggregation
-  (`AuthorizeSet`); corpus 95 → 98 (decide 35 → 38); Go/Python/TS 98/98 and
+  (`AuthorizeSet`); corpus 95 → 98 (decide 35 → 38); Go/Python/TS 105/105 and
   1184/1184 (0 failures), counters 869/841 in all three (`-count=1`).
 - 2026-09-12 rev 11: CLC-1.2 sweep — `unresolved` channel (allow-side additive
   field), `invalid_constraint` value grammar, §3 scheme grammar, max_rows
@@ -524,7 +524,7 @@ exists — `ts/` in this repository (`clc_semantics.ts` + `vectors-run.ts` +
 `property.ts`, Node-only, zero npm deps) — and it is part of the conformance bar:
 all three run `vectors.json` and `property-cases.json` from `varwof/capability`.
 
-Current state (2026-09-11): **83 vectors** (was 60 when this report was
+Current state (2026-09-11): **105 vectors** (was 60 when this report was
 written; `params-022..024`, `decide-016..018`, `intersect-007..010` and the
 boundary positives were added since) and **524 property cases**, with all three
 implementations agreeing on both corpora.
@@ -548,7 +548,7 @@ corpus holds single-fault inputs only, so no runner currently catches it.
 > **Update (2026-09-12, rev 12)**: the multi-fault gap was closed that same
 > evening — `params-025/-026/-027` pin the §6.2 item 5 order and `ts`
 > `validateRawParams` is now a two-pass scan (size/depth before dup/number).
-> Current corpus is 98 vectors and 1184 property cases (see rev 12 above).
+> Current corpus is 105 vectors and 1184 property cases (see rev 12 above).
 
 See also `varwof/capability` → `docs/design-notes.md` for the English decision record
 (why each rule was chosen, what was rejected, and the probe batch that found three

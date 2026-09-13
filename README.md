@@ -133,7 +133,7 @@ python3 vectors-run.py && python3 property_test.py
 ```
 
 Corpora (in `varwof/capability`, `data/_vectors/clc-v1/`): `vectors.json`
-(98 vectors, incl. the rev CLC-1.3 `allow_unresolved` verdict and §9.3
+(105 vectors, incl. the rev CLC-1.3 `allow_unresolved` verdict and §9.3
 multi-grant aggregation), `property-cases.json` (1184 deterministic P11
 cases), `offline-vectors.json` (OCMP reference cases).
 

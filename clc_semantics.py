@@ -91,7 +91,7 @@ RECOGNIZED_CONSTRAINT_IDENTITIES = {
 # (rev CLC-1.3 · 2026-09-12: CLC-1.3 is additive — `allow_unresolved`
 # verdict + §9.3 identity/aggregation clarifications — so CLC-1.2/1.1
 # inputs still read fine.)
-CLC_REVISION = "CLC-1.3"
+CLC_REVISION = "CLC-1.4"
 # §6.2 step 4: bounds on the JCS-serialized params form.
 MAX_PARAMS_SERIALIZED_BYTES = 512
 MAX_PARAMS_NESTING = 32
@@ -126,6 +126,20 @@ def validate_capability_id(cid: str) -> None:
         raise InvalidCapabilityID("invalid_capability_id")
 
 
+def _reject_non_finite(value: Any) -> None:
+    """Reject non-finite numbers anywhere in params (rev CLC-1.4).  JSON
+    cannot represent them, and a value that no bound check can compare must
+    not become an allow (NaN compares false against every bound)."""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise InvalidParamsNumber("invalid_params_number")
+    if isinstance(value, dict):
+        for v in value.values():
+            _reject_non_finite(v)
+    elif isinstance(value, list):
+        for v in value:
+            _reject_non_finite(v)
+
+
 def validate_params(params: Optional[dict]) -> None:
     """Check for null values in params (CLC-v1 §5.2) and apply the §6.2
     step 4 caps to the decoded-object path (§6.2 step 6, rev CLC-1.2):
@@ -134,9 +148,12 @@ def validate_params(params: Optional[dict]) -> None:
     check (layer order)."""
     if params is None:
         return
+    _reject_non_finite(params)
+
     if _params_depth(params, 1) > MAX_PARAMS_NESTING:
         raise InvalidParamsSize("invalid_params_size")
-    if len(json.dumps(params, separators=(",", ":"), sort_keys=True)) > MAX_PARAMS_SERIALIZED_BYTES:
+    if len(json.dumps(params, separators=(",", ":"), sort_keys=True,
+                          ensure_ascii=False).encode("utf-8")) > MAX_PARAMS_SERIALIZED_BYTES:
         raise InvalidParamsSize("invalid_params_size")
     for k, v in params.items():
         if v is None:
@@ -175,23 +192,47 @@ def revision_compatible(input_revision: str) -> bool:
     return i_maj == maj and i_min <= minor
 
 
+def _utf8_len(s: str) -> int:
+    """UTF-8 octet length of one source character (§6.2 measures octets, not
+    code points or UTF-16 code units)."""
+    return len(s.encode("utf-8"))
+
+
 def _scan_raw_params(t: str) -> tuple[int, int]:
-    """Return (max nesting depth, compact length) of raw JSON params text.
-    Whitespace outside strings is dropped (canonical-size proxy, §6.2)."""
+    r"""Return (max nesting depth, compact octet length) of raw JSON params
+    text.  Whitespace outside strings is dropped; string content is measured
+    after unescaping (a \uXXXX escape counts the UTF-8 octets of the decoded
+    character) while duplicate keys stay counted, so the size rule still runs
+    before the duplicate-key check (rev CLC-1.4, §6.2 item 5)."""
     depth = 0
     max_depth = 0
     length = 0
     in_string = False
-    esc = False
-    for ch in t:
+    i = 0
+    n = len(t)
+    while i < n:
+        ch = t[i]
         if in_string:
-            length += 1
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
+            if ch == "\\" and i + 1 < n:
+                nxt = t[i + 1]
+                if nxt == "u" and i + 5 < n:
+                    try:
+                        dec = chr(int(t[i + 2:i + 6], 16))
+                    except ValueError:
+                        length += 2
+                        i += 2
+                        continue
+                    length += 2 if ord(dec) < 0x20 else _utf8_len(dec)
+                    i += 6
+                    continue
+                dec = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}.get(nxt, nxt)
+                length += 2 if ord(dec) < 0x20 else _utf8_len(dec)
+                i += 2
+                continue
+            if ch == '"':
                 in_string = False
+            length += _utf8_len(ch)
+            i += 1
             continue
         if ch == '"':
             in_string = True
@@ -203,10 +244,9 @@ def _scan_raw_params(t: str) -> tuple[int, int]:
         elif ch in "}]":
             depth = max(0, depth - 1)
             length += 1
-        elif ch in " \t\n\r":
-            continue
-        else:
-            length += 1
+        elif ch not in " \t\n\r":
+            length += _utf8_len(ch)
+        i += 1
     return max_depth, length
 
 
@@ -659,7 +699,16 @@ def check_constraint(c: str, op: dict) -> Optional[str]:
             # Op-absent max_rows → fail closed (§8.1 value-grammar table).
             return "max_rows:violated"
         rows = params["max_rows"]
-        if isinstance(rows, (int, float)) and not isinstance(rows, bool) and rows > max_val:
+        # Op-side value domain (rev CLC-1.4): a row count must be a finite
+        # non-negative integer; anything else cannot be shown to satisfy the
+        # constraint, so it fails closed instead of passing unchecked.
+        if isinstance(rows, bool) or not isinstance(rows, (int, float)):
+            return "max_rows:violated"
+        if isinstance(rows, float) and (not math.isfinite(rows) or not rows.is_integer()):
+            return "max_rows:violated"
+        if rows < 0:
+            return "max_rows:violated"
+        if rows > max_val:
             return "max_rows:violated"
 
     return None
