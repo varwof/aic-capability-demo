@@ -16,12 +16,13 @@
 // follows the spec, and the divergence is recorded in
 // capability/data/_vectors/clc-v1/clc-v1-ambiguities.md.
 
+import { createHash } from 'node:crypto';
+
 export interface Grant {
     id: string;
     params?: Record<string, unknown> | null;
     constraints?: string[];
 }
-
 export interface Operation {
     id: string;
     params?: Record<string, unknown> | null;
@@ -70,7 +71,10 @@ export const RECOGNIZED_CONSTRAINT_IDENTITIES = new Set(
 // (rev CLC-1.3 · 2026-09-12: CLC-1.3 is additive — `allow_unresolved`
 // verdict + §9.3 identity/aggregation clarifications — so CLC-1.2/1.1
 // inputs still read fine.)
-export const CLC_REVISION = 'CLC-1.4';
+// (rev CLC-1.6 · 2026-09-14: `jcs-sha256` is a real RFC 8785 implementation.
+// The material projection digest and `clc-action:` identifier change for
+// material containing `&`, `<` or `>`; CLC-1.4/1.5 inputs still read.)
+export const CLC_REVISION = 'CLC-1.6';
 // §6.2 step 4: bounds on the JCS-serialized params form.
 export const MAX_PARAMS_SERIALIZED_BYTES = 512;
 export const MAX_PARAMS_NESTING = 32;
@@ -605,6 +609,50 @@ export function canonicalStringify(v: unknown): string {
         return '{' + parts.join(',') + '}';
     }
     return 'null';
+}
+
+// canonicalJSON renders a JSON value per RFC 8785 (JCS) — the same bytes Go's
+// `CanonicalJSON` emits.  Object keys sort by UTF-16 code units (§3.2.3;
+// JavaScript's default string order), strings use the §3.2.2.2 escape set
+// (`JSON.stringify` does not escape `&`, `<` or `>`), and numbers use
+// ECMAScript Number::toString.  A non-finite number has no JSON encoding.
+export function canonicalJSON(v: unknown): string {
+    if (v === null) return 'null';
+    if (typeof v === 'number') {
+        if (!Number.isFinite(v)) throw new SemanticsError('canonical_invalid_number');
+        return JSON.stringify(v);
+    }
+    if (typeof v === 'string') return JSON.stringify(v);
+    if (typeof v === 'boolean') return v ? 'true' : 'false';
+    if (Array.isArray(v)) return '[' + v.map(canonicalJSON).join(',') + ']';
+    if (isPlainObject(v)) {
+        const parts: string[] = [];
+        for (const k of Object.keys(v).sort()) {
+            parts.push(JSON.stringify(k) + ':' + canonicalJSON(v[k]));
+        }
+        return '{' + parts.join(',') + '}';
+    }
+    throw new SemanticsError('canonical_unexpected_type');
+}
+
+// computeActionId is §4.3's projection identity over the declared material
+// fields: clc-action:1:<type>:<suite>:<b64url(sha256(JCS(projection)))>.  A
+// declared field that is absent makes the action non-matchable.
+export function computeActionId(
+    actionType: string,
+    materialFields: string[],
+    suite: string,
+    action: Record<string, unknown>,
+): string {
+    const projection: Record<string, unknown> = {};
+    for (const field of materialFields) {
+        if (!Object.prototype.hasOwnProperty.call(action, field)) {
+            throw new SemanticsError('action_not_matchable: ' + field);
+        }
+        projection[field] = action[field];
+    }
+    const digest = createHash('sha256').update(canonicalJSON(projection), 'utf8').digest('base64url');
+    return `clc-action:1:${actionType}:${suite}:${digest}`;
 }
 
 // valueSubset checks if a single value is a subset of the grant value.

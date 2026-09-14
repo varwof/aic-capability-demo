@@ -127,9 +127,13 @@ reason code and the merged intersection result**:
 ```bash
 # all three, against the shared corpora in varwof/capability
 export CLC_VECTORS=../capability/data/_vectors/clc-v1/vectors.json
+export CLC_PROPERTY_CASES=../capability/data/_vectors/clc-v1/property-cases.json
 python3 vectors-run.py && python3 property_test.py
-(cd ts && node --experimental-strip-types vectors-run.ts && node --experimental-strip-types property.ts)
+node --experimental-strip-types ts/vectors-run.ts && node --experimental-strip-types ts/property.ts
 (cd ../register && go run ./cmd/vectors-run/ && go test ./semantics/ -run TestIntersectionProperty)
+# RFC 8785 canonicalization (rev CLC-1.6): Go, Python and TypeScript must emit
+# the same JCS bytes, digest and clc-action: identifier.
+python3 jcs_check.py && node --experimental-strip-types ts/jcs_check.ts
 ```
 
 Corpora (in `varwof/capability`, `data/_vectors/clc-v1/`): `vectors.json`

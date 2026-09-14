@@ -5,10 +5,13 @@ This is an independent implementation of the CLC-v1 authorization semantics.
 It is NOT a translation of the Go implementation; it follows the spec directly.
 The对外判决 must match the Go implementation exactly.
 """
+import base64
+import hashlib
 import json
 import math
 import re
 import sys
+from decimal import Decimal
 from typing import Any, Callable, Optional
 
 
@@ -71,6 +74,12 @@ class UnsupportedLanguageRevision(CLCError):
     pass
 
 
+class CanonicalJSONError(CLCError):
+    """A value has no RFC 8785 (JCS) encoding (non-finite number, lone
+    surrogate, or a type JSON does not carry)."""
+    pass
+
+
 # Verdicts (rev CLC-1.3: allow_unresolved is the independent verdict for
 # recognized-but-unevaluated constraint obligations, §8.4).
 VERDICT_ALLOW = "allow"
@@ -91,7 +100,10 @@ RECOGNIZED_CONSTRAINT_IDENTITIES = {
 # (rev CLC-1.3 · 2026-09-12: CLC-1.3 is additive — `allow_unresolved`
 # verdict + §9.3 identity/aggregation clarifications — so CLC-1.2/1.1
 # inputs still read fine.)
-CLC_REVISION = "CLC-1.4"
+# (rev CLC-1.6 · 2026-09-14: `jcs-sha256` is a real RFC 8785 implementation.
+# The material projection digest and `clc-action:` identifier change for
+# material containing `&`, `<` or `>`; CLC-1.4/1.5 inputs still read.)
+CLC_REVISION = "CLC-1.6"
 # §6.2 step 4: bounds on the JCS-serialized params form.
 MAX_PARAMS_SERIALIZED_BYTES = 512
 MAX_PARAMS_NESTING = 32
@@ -171,6 +183,115 @@ def _params_depth(v: Any, depth: int) -> int:
         for c in v:
             max_depth = max(max_depth, _params_depth(c, depth + 1))
     return max_depth
+
+
+def _jcs_escape_string(s: str) -> str:
+    """RFC 8785 §3.2.2.2 string serialization: escape only `"`, `\\` and the
+    control characters; `&`, `<`, `>` and non-ASCII stay raw UTF-8."""
+    out = ['"']
+    for ch in s:
+        o = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == '\\':
+            out.append('\\\\')
+        elif ch == '\b':
+            out.append('\\b')
+        elif ch == '\f':
+            out.append('\\f')
+        elif ch == '\n':
+            out.append('\\n')
+        elif ch == '\r':
+            out.append('\\r')
+        elif ch == '\t':
+            out.append('\\t')
+        elif o < 0x20:
+            out.append('\\u%04x' % o)
+        else:
+            out.append(ch)
+    out.append('"')
+    return ''.join(out)
+
+
+def _utf16_sort_key(s: str) -> bytes:
+    """UTF-16 code-unit order (§3.2.3), as the lexicographic order of the
+    big-endian UTF-16 bytes.  Python's default string order compares code
+    points, which differs for astral characters (a surrogate pair sorts below
+    a BMP code point in 0xE000..0xFFFF)."""
+    return s.encode('utf-16-be')
+
+
+def _canonical_number(value: float) -> str:
+    """ECMAScript Number::toString (RFC 8785 §3.2.2.3).  `repr` gives the
+    shortest round-tripping decimal; Decimal exposes its digits and decimal
+    exponent so the ECMAScript formatting rules can be applied exactly."""
+    if value == 0:
+        return '0'  # both +0 and -0
+    if not math.isfinite(value):
+        raise CanonicalJSONError('canonical_invalid_number')
+    sign = '-' if value < 0 else ''
+    tuple_repr = Decimal(repr(abs(value))).as_tuple()
+    digits = ''.join(str(d) for d in tuple_repr.digits)
+    exponent = tuple_repr.exponent
+    stripped = digits.rstrip('0')
+    if stripped == '':
+        return sign + '0'
+    exponent += len(digits) - len(stripped)
+    digits = stripped
+    k = len(digits)
+    n = k + exponent  # value = 0.<digits> * 10**n
+    if k <= n <= 21:
+        return sign + digits + '0' * (n - k)
+    if 0 < n <= 21:
+        return sign + digits[:n] + '.' + digits[n:]
+    if -6 < n <= 0:
+        return sign + '0.' + '0' * (-n) + digits
+    mantissa = digits if k == 1 else digits[0] + '.' + digits[1:]
+    e = n - 1
+    return sign + mantissa + 'e' + ('+' if e >= 0 else '-') + str(abs(e))
+
+
+def canonical_json(value: Any) -> str:
+    """RFC 8785 (JCS) canonical JSON — the same bytes Go's `CanonicalJSON`
+    emits, so the material projection digest is shared across implementations.
+    Object keys are ordered by UTF-16 code units, strings use the §3.2.2.2
+    escapes, and numbers use ECMAScript `Number::toString`."""
+    if value is None:
+        return 'null'
+    if value is True:
+        return 'true'
+    if value is False:
+        return 'false'
+    if isinstance(value, str):
+        return _jcs_escape_string(value)
+    if isinstance(value, int):  # bool is handled above
+        return _canonical_number(float(value))
+    if isinstance(value, float):
+        return _canonical_number(value)
+    if isinstance(value, list):
+        return '[' + ','.join(canonical_json(item) for item in value) + ']'
+    if isinstance(value, dict):
+        return '{' + ','.join(
+            _jcs_escape_string(key) + ':' + canonical_json(value[key])
+            for key in sorted(value.keys(), key=_utf16_sort_key)
+        ) + '}'
+    raise CanonicalJSONError('canonical_unexpected_type: %s' % type(value).__name__)
+
+
+def compute_action_id(action_type: str, material_fields, suite: str,
+                      action: dict) -> str:
+    """§4.3 ActionId over the declared material projection:
+    `clc-action:1:<type>:<suite>:<b64url(sha256(JCS(projection)))>`.  A declared
+    field that is absent makes the action non-matchable."""
+    projection = {}
+    for field in material_fields:
+        if field not in action:
+            raise CanonicalJSONError('action_not_matchable: %s' % field)
+        projection[field] = action[field]
+    digest = hashlib.sha256(canonical_json(projection).encode('utf-8')).digest()
+    return 'clc-action:1:%s:%s:%s' % (
+        action_type, suite,
+        base64.urlsafe_b64encode(digest).rstrip(b'=').decode('ascii'))
 
 
 def _parse_revision(rev: str) -> tuple[Optional[int], Optional[int]]:

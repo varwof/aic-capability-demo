@@ -19,6 +19,42 @@ Date: 2026-09-12 (rev 12: CLC-1.3 closeout — 105 vectors; `allow_unresolved` i
 | P11 property (intersection, shared 1184 cases) | 1184 cases / 869 order-symmetry checks / 841 closure probes / 0 failures in Go, Python and TS (Go verified with `-count=1`; after the rev CLC-1.3 `{}`≡absent rule the closure probe skips empty-params merged grants — see Addendum 2) |
 | Differences | 0 |
 
+## rev 13 Changes (2026-09-14) — CLC-1.6: `jcs-sha256` is RFC 8785
+
+The material-projection digest and the `clc-action:` identifier are SHA-256 over
+**RFC 8785 (JCS)**.  Go's `json.Marshal` HTML-escaped `&`, `<`, `>` (to
+`\u0026`, `\u003c`, `\u003e`) and ordered object keys by UTF-8 bytes, so the
+bytes were not JCS.  All three implementations now share one canonicalization:
+
+- object members in UTF-16 code-unit order (§3.2.3);
+- strings escaped per §3.2.2.2 (`"`, `\`, controls only; `&`, `<`, `>`, U+2028,
+  U+2029 and non-ASCII stay raw);
+- numbers per ECMAScript `Number::toString` (§3.2.2.3);
+- no insignificant whitespace; invalid UTF-8 / lone surrogates are refused.
+
+The review reproducer, `{"value":"&"}`:
+
+| Implementation | JCS bytes | SHA-256 | `clc-action:1:probe.action.1:jcs-sha256:<b64url>` |
+|---|---|---|---|
+| Go (`register/semantics`) | `{"value":"&"}` | `9a2fe282f2733070b5a91a182e97d8efdf6e94135e4790a73a380257200a2903` | `…:mi_igvJzMHC1qRoYLpfY799ulBNeR5CnOjgCVyAKKQM` |
+| Python (`clc_semantics.py`) | `{"value":"&"}` | same | same |
+| TypeScript (`ts/clc_semantics.ts`) | `{"value":"&"}` | same | same |
+
+Key ordering was checked with a key set that separates UTF-16 from UTF-8 byte
+order: `{"a":"ascii","\u{1F4A9}":"astral","\uE000":"bmp"}` (the surrogate pair
+sorts before U+E000).  Go's canonicalizer was additionally cross-checked against
+Node's `Number.prototype.toString` on ~300k doubles and against the
+cyberphone/json-canonicalization reference vectors (`arrays`, `french`,
+`structures`, `unicode`, `values`, `weird`) — 0 mismatches.
+
+This changes identifiers/digests for material containing `&`, `<`, `>` (CLC-1.6
+is not byte-compatible with CLC-1.5 there); the corpora add `eva-006` (an RFC
+8785 action-id vector) and `evr-007`, which pins the exported §10 `Satisfaction`
+report (internal `unknown` → `UNSATISFIED`/`evidence_not_core_evaluated`).
+
+Reproduce: `python3 jcs_check.py`, `node --experimental-strip-types ts/jcs_check.ts`,
+and `(cd ../register && go test ./semantics/ -run TestCanonical)`.
+
 ## Per-Kind Breakdown
 
 Grouped by `kind` field (as in vectors.json):
