@@ -21,6 +21,18 @@ Date: 2026-09-12 (rev 12: CLC-1.3 closeout — 105 vectors; `allow_unresolved` i
 
 ## rev 13 Changes (2026-09-14) — CLC-1.6: `jcs-sha256` is RFC 8785
 
+**Invalid Unicode is refused, and the raw path is where that can still be seen.**
+A decoder substitutes U+FFFD for a lone surrogate escape before any value-level
+check runs, so all three implementations enforce this on the *raw params text*:
+a lone `\uD800`-`\uDFFF` escape is `invalid_params_number`, while a valid
+surrogate pair is one character (four UTF-8 octets). Before this, Python refused
+a valid pair and TypeScript accepted a lone surrogate. Pinned by `vectors.json`
+`params-031` (lone escape -> deny) and `params-032` (pair -> allow), and by the
+Go scan unit tests. The canonicalizers themselves refuse unpaired surrogates
+rather than emitting or escaping them: `canonical_json`, `canonicalJSON` and
+`CanonicalJSON` raise on such input.
+
+
 The material-projection digest and the `clc-action:` identifier are SHA-256 over
 **RFC 8785 (JCS)**.  Go's `json.Marshal` HTML-escaped `&`, `<`, `>` (to
 `\u0026`, `\u003c`, `\u003e`) and ordered object keys by UTF-8 bytes, so the

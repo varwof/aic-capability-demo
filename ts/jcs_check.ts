@@ -29,8 +29,26 @@ check('b64url', createHash('sha256').update(bytesOut, 'utf8').digest('base64url'
 check('action id', computeActionId('probe.action.1', ['value'], 'jcs-sha256', { value: '&' }), EXPECT_ID);
 check('utf-16 key order', canonicalJSON({ '\uE000': 'bmp', '\u{1F4A9}': 'astral', a: 'ascii' }), EXPECT_KEY_ORDER);
 
+// Invalid Unicode is refused, not repaired or escaped: a lone surrogate has no
+// UTF-8 form and therefore no JCS encoding (RFC 8785 3.2.2.2).  A well-formed
+// pair is accepted and stays raw.
+check('surrogate pair accepted', canonicalJSON('\u{1F602}'), '"\u{1F602}"');
+for (const [label, input] of [
+    ['lone high surrogate', '\ud800'],
+    ['lone low surrogate', '\udc00'],
+    ['lone surrogate key', { ['\ud800']: 1 }],
+] as [string, unknown][]) {
+    let refused = false;
+    try {
+        canonicalJSON(input);
+    } catch {
+        refused = true;
+    }
+    check(label + ' refused', String(refused), 'true');
+}
+
 if (fails.length > 0) {
     console.error(fails.join('\n'));
     process.exit(1);
 }
-console.log('jcs_check: 5 checks passed (RFC 8785 bytes/digest/action-id/key-order)');
+console.log('jcs_check: 9 checks passed (RFC 8785 bytes/digest/action-id/key-order/invalid-unicode)');

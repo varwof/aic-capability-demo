@@ -43,7 +43,17 @@ check("action id", compute_action_id("probe.action.1", ["value"], "jcs-sha256", 
 check("utf-16 key order", canonical_json({
     "\uE000": "bmp", "\U0001F4A9": "astral", "a": "ascii"}), EXPECT_KEY_ORDER)
 
+# Invalid Unicode is refused, not repaired or escaped: a lone surrogate has no
+# UTF-8 form and therefore no JCS encoding (RFC 8785 3.2.2.2).
+check("surrogate pair accepted", canonical_json("\U0001F602"), '"\U0001F602"')
+for label, bad in [("lone high surrogate", "\ud800"), ("lone low surrogate", "\udc00")]:
+    try:
+        canonical_json(bad)
+        check(label + " refused", "not refused", "refused")
+    except Exception:
+        pass
+
 if FAILS:
     print("\n".join(FAILS))
     sys.exit(1)
-print("jcs_check: 5 checks passed (RFC 8785 bytes/digest/action-id/key-order)")
+print("jcs_check: 9 checks passed (RFC 8785 bytes/digest/action-id/key-order/invalid-unicode)")

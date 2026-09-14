@@ -207,6 +207,10 @@ def _jcs_escape_string(s: str) -> str:
             out.append('\\t')
         elif o < 0x20:
             out.append('\\u%04x' % o)
+        elif 0xD800 <= o <= 0xDFFF:
+            # A lone surrogate is not valid Unicode, so it has no UTF-8 form and
+            # no JCS encoding: refuse rather than emit an unencodable string.
+            raise CanonicalJSONError('canonical_lone_surrogate: U+%04X' % o)
         else:
             out.append(ch)
     out.append('"')
@@ -338,13 +342,29 @@ def _scan_raw_params(t: str) -> tuple[int, int]:
                 nxt = t[i + 1]
                 if nxt == "u" and i + 5 < n:
                     try:
-                        dec = chr(int(t[i + 2:i + 6], 16))
+                        cp = int(t[i + 2:i + 6], 16)
                     except ValueError:
                         length += 2
                         i += 2
                         continue
-                    length += 2 if ord(dec) < 0x20 else _utf8_len(dec)
-                    i += 6
+                    consumed = 6
+                    if 0xD800 <= cp <= 0xDBFF:
+                        # A high surrogate must be followed by a low surrogate;
+                        # the pair is one character, and a lone surrogate is
+                        # invalid Unicode that cannot be encoded at all.
+                        lo_hex = t[i + 8:i + 12] if i + 11 < n else ""
+                        if (t[i + 6:i + 8] != "\\u" or len(lo_hex) != 4
+                                or any(c not in "0123456789abcdefABCDEF" for c in lo_hex)):
+                            raise CanonicalJSONError("invalid_params_number: lone surrogate escape")
+                        lo = int(lo_hex, 16)
+                        if not (0xDC00 <= lo <= 0xDFFF):
+                            raise CanonicalJSONError("invalid_params_number: lone surrogate escape")
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+                        consumed = 12
+                    elif 0xDC00 <= cp <= 0xDFFF:
+                        raise CanonicalJSONError("invalid_params_number: lone surrogate escape")
+                    length += 2 if cp < 0x20 else _utf8_len(chr(cp))
+                    i += consumed
                     continue
                 dec = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}.get(nxt, nxt)
                 length += 2 if ord(dec) < 0x20 else _utf8_len(dec)

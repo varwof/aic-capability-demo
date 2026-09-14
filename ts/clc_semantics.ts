@@ -290,9 +290,32 @@ function scanRawParams(raw: string, strict: boolean): { value: unknown; compact:
                         if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
                             fail();
                         }
-                        out += String.fromCharCode(parseInt(hex, 16));
-                        i += 4;
-                        break;
+                        const hi = parseInt(hex, 16);
+                        if (hi >= 0xd800 && hi <= 0xdbff) {
+                            // A high surrogate must be followed by a low
+                            // surrogate escape: the pair is one character, and
+                            // a lone surrogate cannot be encoded (RFC 8785).
+                            const loHex = t.slice(i + 8, i + 12);
+                            if (t[i + 6] !== '\\' || (t[i + 7] ?? '') !== 'u' ||
+                                !/^[0-9a-fA-F]{4}$/.test(loHex)) {
+                                fail();
+                            }
+                            const lo = parseInt(loHex, 16);
+                            if (lo < 0xdc00 || lo > 0xdfff) {
+                                fail();
+                            }
+                            out += String.fromCharCode(hi, lo);
+                            compact += 4; // the astral character: four UTF-8 octets
+                            i += 12;
+                            continue;
+                        }
+                        if (hi >= 0xdc00 && hi <= 0xdfff) {
+                            fail(); // lone low surrogate
+                        }
+                        out += String.fromCharCode(hi);
+                        compact += hi < 0x20 ? 2 : utf8Len(String.fromCharCode(hi));
+                        i += 6;
+                        continue;
                     }
                     default: fail();
                 }
@@ -616,19 +639,39 @@ export function canonicalStringify(v: unknown): string {
 // JavaScript's default string order), strings use the §3.2.2.2 escape set
 // (`JSON.stringify` does not escape `&`, `<` or `>`), and numbers use
 // ECMAScript Number::toString.  A non-finite number has no JSON encoding.
+// wellFormed refuses unpaired surrogates: a lone UTF-16 surrogate is not valid
+// Unicode, so it has no UTF-8 form and no JCS encoding (RFC 8785 §3.2.2.2).
+function wellFormed(s: string, what: string): string {
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c >= 0xd800 && c <= 0xdbff) {
+            const next = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+            if (next < 0xdc00 || next > 0xdfff) {
+                throw new SemanticsError('canonical_lone_surrogate: ' + what);
+            }
+            i++;
+            continue;
+        }
+        if (c >= 0xdc00 && c <= 0xdfff) {
+            throw new SemanticsError('canonical_lone_surrogate: ' + what);
+        }
+    }
+    return s;
+}
+
 export function canonicalJSON(v: unknown): string {
     if (v === null) return 'null';
     if (typeof v === 'number') {
         if (!Number.isFinite(v)) throw new SemanticsError('canonical_invalid_number');
         return JSON.stringify(v);
     }
-    if (typeof v === 'string') return JSON.stringify(v);
+    if (typeof v === 'string') return JSON.stringify(wellFormed(v, 'string'));
     if (typeof v === 'boolean') return v ? 'true' : 'false';
     if (Array.isArray(v)) return '[' + v.map(canonicalJSON).join(',') + ']';
     if (isPlainObject(v)) {
         const parts: string[] = [];
         for (const k of Object.keys(v).sort()) {
-            parts.push(JSON.stringify(k) + ':' + canonicalJSON(v[k]));
+            parts.push(JSON.stringify(wellFormed(k, 'key')) + ':' + canonicalJSON(v[k]));
         }
         return '{' + parts.join(',') + '}';
     }
