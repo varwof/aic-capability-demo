@@ -92,7 +92,7 @@ deterministic for a fixed seed. Determinism is total and verified.
 
 | class | unique cases | impl-rows | axes |
 |-------|--------------|-----------|------|
-| cross_impl (decoded path) | 2,047 | | a03: 1,791 lone surrogates (F1), 256 `raw_b64` (F2) |
+| cross_impl (decoded path) | 2,047 | | a03: 1,791 lone surrogates (F1, documented boundary), 256 `raw_b64` (F2) |
 | cross_impl (raw path) | 164 | | a03 `raw_b64` only (F2) |
 | cross_impl (value digest) | 164 | | a03 `raw_b64` (F2) |
 | cross_path (designed) | 12,617 | 33,757 | a02 10,000, a03 2,047, a04 570 |
@@ -115,7 +115,7 @@ API and can only do so lossily, so the three are not being fed the same thing
 
 ---
 
-## F1 (open) - Go repairs lone surrogates on the decoded path
+## F1 (a documented boundary since CLC-1.8) - Go repairs lone surrogates on the decoded path
 
 **Class:** cross_impl, decoded path
 **Axis:** a03, lone UTF-16 surrogate escapes in the raw JSON text
@@ -164,19 +164,39 @@ $ go run ./semantics/fuzz_runner /tmp/eq.jsonl
 Same decoded value, same canonical digest. On the raw path Go denies `t_sur`
 and allows `t_rep`, which is correct; only the decoded path is unsafe.
 
-### No post-decode remedy
+### No post-decode remedy - and why that is not the end of it
 
 Because the repair is lossy, a scan of the decoded value cannot separate the two
-inputs: `\ud800` and a genuine U+FFFD are identical after decoding. The only
-sound place to catch this is the raw text, which is what the 6.2 boundary is
-for. An earlier draft of this report proposed adding a post-decode scan in Go;
-that proposal was wrong, because there is nothing left to scan, and it has been
-withdrawn.
+inputs: `\ud800` and a genuine U+FFFD are identical after decoding. An earlier
+draft of this report proposed adding a post-decode scan in Go; that proposal was
+wrong, because there is nothing left to scan, and it has been withdrawn.
 
-What is actionable here is a consumer rule, not a Go change: an implementation
-that must reject lone surrogates has to run the 6.2 raw check on the original
-octets. After a lossy decoder has touched the input the information is gone in
-all three languages.
+What is not true is that the disagreement is therefore unsolvable. The
+information is unrecoverable, but the divergence can still be closed, because
+it does not need the information - it needs an obligation about where the check
+runs. CLC-1.8 states it in three places:
+
+1. **§6.2 item 7** makes the boundary check a property of the received text: a
+   lone surrogate escape or an invalid octet has no JCS form, so steps 1-5 MUST
+   run on the octets as received, before any decoding.
+2. **The same item** forbids the substitution: an implementation that exposes
+   only a decoded-value entry point MUST NOT be described as refusing malformed
+   Unicode, because its verdict is defined over the value it was handed and that
+   value may already be repaired.
+3. **§11** states that a §6.2 refusal does not transfer to a decoded value, so a
+   deployment that must reproduce the refusal, or that applies a permit to a
+   request it did not evaluate, anchors the decision to the received octets or
+   to a digest of them.
+
+The implementations follow that naming: Go `AuthorizeJSONText`,
+Python `authorize_json_text`, TypeScript `authorizeJsonText` are the normative
+entry points, and the decoded-value entries carry the obligation in their
+documentation. Go's `TestAuthorizeJSONTextIsTheNormativeEntry` pins the two
+inputs that no decoded entry point can separate.
+
+One step in this class is not closable, and should not be papered over: a caller
+that has already decoded the text cannot recover the distinction, and no
+implementation can refuse on its behalf.
 
 ### Location
 
@@ -462,7 +482,9 @@ Rerun step 2 and `diff` the result files to confirm determinism.
   per-case findings in `fuzz-findings.json`, summary in
   `fuzz/findings-summary.json`.
 - Repeatable: fixed seed, deterministic generator, byte-identical reruns.
-- Open: F1 (no decoded-path remedy; a consumer rule is required). F2 is a
+- F1 is closed as a documented boundary (CLC-1.8 §6.2 item 7, §11) rather
+  than by a code change, because the information a decoded path would need is
+  gone. F2 is a
   harness and API question rather than a CLC finding - the TypeScript binding
   would need a byte-oriented raw entry point before `raw_b64` can be tested
   against it at all. Neither is folded into the designed class.

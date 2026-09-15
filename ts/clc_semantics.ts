@@ -1348,6 +1348,40 @@ export function authorize(
     return authorizeSet([effectiveGrant], op);
 }
 
+// authorizeJsonText is the normative entry point for a caller that holds the
+// operation's params as JSON text: validateRawParams runs the §6.2
+// input-boundary checks on that text and returns the decoded object, so one
+// call covers the boundary and the decision.  Prefer it over JSON.parse
+// followed by authorizeSet, because the parse is lossy for exactly the inputs
+// §6.2 refuses (§6.2 item 7).  rawParams may be empty for an operation that
+// carries no params; a refusal is returned as deny with the §6.2 reason code.
+export function authorizeJsonText(
+    grants: Array<Grant | null | undefined>,
+    opId: string,
+    rawParams = '',
+): Decision {
+    if (!rawParams) {
+        return authorizeSet(grants, { id: opId });
+    }
+    let params: Record<string, unknown>;
+    try {
+        params = validateRawParams(rawParams);
+    } catch (error) {
+        if (error instanceof SemanticsError) {
+            return { verdict: VERDICT_DENY, reason: error.message };
+        }
+        throw error;
+    }
+    return authorizeSet(grants, { id: opId, params });
+}
+
+// The caller must already have run the §6.2 input-boundary checks on the text
+// it received, if it received text.  A params value that has been through a
+// JSON decoder no longer carries the information those checks use: a decoder
+// that repairs an invalid surrogate or octet produces a value indistinguishable
+// from a legitimate U+FFFD (§6.2 item 7).  A caller holding the raw text should
+// call authorizeJsonText.
+//
 // authorizeSet evaluates the §9.3 multi-grant aggregation (rev CLC-1.3):
 //   - grants all absent (null or empty id) → deny capability_not_authorized
 //     (resolved before any layer check, per §9.3 pre-check);

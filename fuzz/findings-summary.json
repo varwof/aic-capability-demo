@@ -110,6 +110,7 @@
       "typescript_literal_astral_counted_by_utf16_code_unit": "F7",
       "typescript_accepted_literal_control_character": "F7",
       "pinned_by": "params-033..039"
-    }
+    },
+    "f1_status": "closed as a documented boundary in CLC-1.8: 6.2 item 7 requires the boundary checks on the received text before any decoding and forbids describing a decoded-value-only entry point as refusing malformed Unicode; 11 states that a 6.2 refusal does not transfer to a decoded value.  The information itself stays unrecoverable after a lossy decode."
   }
 }

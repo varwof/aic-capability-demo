@@ -1068,8 +1068,38 @@ def _is_params_level_reason(reason: str) -> bool:
 
 def authorize(effective_grant: dict, op: dict) -> dict:
     """Evaluate the decision function per CLC-v1 §8 with a single effective
-    grant (§9.3 single-grant path)."""
+    grant (§9.3 single-grant path).
+
+    The caller must already have run the §6.2 input-boundary checks on the text
+    it received, if it received text.  A params value that has been through a
+    JSON decoder no longer carries the information those checks use: a lone
+    surrogate survives here, but a decoder is free to repair it first, and the
+    repaired value is not distinguishable from a legitimate U+FFFD (§6.2 item
+    7).  A caller holding the raw text should call authorize_json_text."""
     return authorize_set([effective_grant], op)
+
+
+def authorize_json_text(grants: list, op_id: str, raw_params: str = "") -> dict:
+    """Normative entry point for a caller that holds the operation's params as
+    JSON text: run the §6.2 input-boundary checks on that text, then evaluate.
+    ``raw_params`` may be empty for an operation that carries no params.
+
+    A refusal is reported as deny with the §6.2 reason code.  Prefer this over
+    decoding the text and calling authorize_set: the decode is lossy for exactly
+    the inputs §6.2 refuses, because a lone surrogate escape or an invalid UTF-8
+    octet is replaced rather than preserved by a general-purpose decoder
+    (§6.2 item 7)."""
+    params = None
+    if raw_params:
+        try:
+            validate_raw_params(raw_params)
+        except CLCError as exc:
+            return {"verdict": "deny", "reason": str(exc)}
+        try:
+            params = json.loads(raw_params)
+        except ValueError:
+            return {"verdict": "deny", "reason": "invalid_params_number"}
+    return authorize_set(grants, {"id": op_id, "params": params})
 
 
 def authorize_set(grants: list, op: dict) -> dict:
