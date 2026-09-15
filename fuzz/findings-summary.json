@@ -84,7 +84,7 @@
   },
   "determinism": "byte-identical reruns, diff exit 0 (py, ts, go)",
   "current": {
-    "corpus_vectors": 113,
+    "corpus_vectors": 114,
     "cross_impl_by_path": {
       "decoded_path": 2047,
       "raw_path": 164,
@@ -108,7 +108,8 @@
     "fixed_since_previous": {
       "raw_size_counts_received_number_spelling": "F7, pinned by params-033..038",
       "typescript_literal_astral_counted_by_utf16_code_unit": "F7",
-      "typescript_accepted_literal_control_character": "F7"
+      "typescript_accepted_literal_control_character": "F7",
+      "pinned_by": "params-033..039"
     }
   }
 }

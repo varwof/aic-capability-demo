@@ -8,7 +8,7 @@ Two runs over the same 100,000-case file are reported:
 |-------|---------------------|----------|--------|
 | before | `75bc79e` (CLC-1.7) | unchanged | 107 vectors |
 | after | `2d3aa9a` | unchanged | 107 vectors |
-| current | raw-boundary fix (CLC-1.8) | raw-boundary fix (CLC-1.8) | 113 vectors |
+| current | raw-boundary fix (CLC-1.8) | raw-boundary fix (CLC-1.8) | 114 vectors |
 
 The first two runs differ only by commit `2d3aa9a` ("refuse non-object params on
 the decoded path"). Case file, runners and the Go implementation are
@@ -408,10 +408,17 @@ It was found by review (Iman Schrock, 2026-09-15), not by the 100,000 cases.
 
 ### Pinned by the shared corpus
 
-`params-033`-`params-038` in `capability/data/_vectors/clc-v1/vectors.json`, one
-pair per direction plus the literal/escaped astral pair. All three
-implementations declare `CLC-1.8` and pass 113 authorization, 32 evidence and 13
-crosswalk vectors, 1,184 property cases, the edge checks and the JCS checks.
+`params-033`-`params-039` in `capability/data/_vectors/clc-v1/vectors.json`: one
+pair per direction, the literal/escaped astral pair, and the literal control
+character.  All three implementations declare `CLC-1.8` and pass 114
+authorization, 32 evidence and 13 crosswalk vectors, 1,184 property cases, the
+edge checks and the JCS checks.
+
+Against the pre-fix implementations only these new vectors move - Go and Python
+fail `params-033`/`params-035`, TypeScript adds `params-037`/`params-039` - and
+the other 110 vectors return the same verdict and reason before and after.  The
+change is confined to the raw boundary at the cap; no well-formed input below it
+behaves differently.
 
 ## Axes with no divergence
 
