@@ -102,8 +102,15 @@ RECOGNIZED_CONSTRAINT_IDENTITIES = {
 # inputs still read fine.)
 # (rev CLC-1.6 · 2026-09-14: `jcs-sha256` is a real RFC 8785 implementation.
 # The material projection digest and `clc-action:` identifier change for
-# material containing `&`, `<` or `>`; CLC-1.4/1.5 inputs still read.)
-CLC_REVISION = "CLC-1.6"
+# material containing `&`, `<` or `>`; the decoded params path refuses
+# malformed Unicode (lone surrogates / invalid UTF-8) with
+# invalid_params_number and counts the §6.2 size in JCS bytes, not a
+# deserializer's re-encoding; the raw params size counts the JCS (RFC 8785
+# §3.2.2.2) octets of every decoded character — `"`, `\` and the control
+# shortcuts escape as two, every other control as `\u00xx` (six), and
+# `&`/`<`/`>`/U+2028/U+2029/non-ASCII stay raw — so the raw and decoded
+# limits agree; CLC-1.4/1.5 inputs still read.)
+CLC_REVISION = "CLC-1.7"
 # §6.2 step 4: bounds on the JCS-serialized params form.
 MAX_PARAMS_SERIALIZED_BYTES = 512
 MAX_PARAMS_NESTING = 32
@@ -152,20 +159,46 @@ def _reject_non_finite(value: Any) -> None:
             _reject_non_finite(v)
 
 
+def _reject_unpaired_surrogates(value: Any) -> None:
+    """Refuse lone UTF-16 surrogates anywhere in a decoded params structure
+    (rev CLC-1.6).  A lone surrogate has no UTF-8 form and no JCS encoding
+    (RFC 8785 §3.2.2.2); a careless `.encode("utf-8")` raises an uncaught
+    UnicodeEncodeError, and a serializer could silently repair it to U+FFFD.
+    It must produce the same stable denial (invalid_params_number) as the raw
+    boundary check, and always before any serialization."""
+    if isinstance(value, str):
+        for ch in value:
+            o = ord(ch)
+            if 0xD800 <= o <= 0xDFFF:
+                raise InvalidParamsNumber("invalid_params_number: lone surrogate U+%04X" % o)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            _reject_unpaired_surrogates(k)
+            _reject_unpaired_surrogates(v)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_unpaired_surrogates(item)
+
+
 def validate_params(params: Optional[dict]) -> None:
     """Check for null values in params (CLC-v1 §5.2) and apply the §6.2
     step 4 caps to the decoded-object path (§6.2 step 6, rev CLC-1.2):
-    the depth cap uses the decoded structure, the size cap a canonical
-    (sorted-key, compact) serialization.  Caps resolve before the null
+    the depth cap uses the decoded structure, the size cap the JCS
+    (RFC 8785) serialization — the same bytes the other implementations
+    count, not json.dumps (rev CLC-1.6).  Caps resolve before the null
     check (layer order)."""
     if params is None:
         return
     _reject_non_finite(params)
+    _reject_unpaired_surrogates(params)
 
     if _params_depth(params, 1) > MAX_PARAMS_NESTING:
         raise InvalidParamsSize("invalid_params_size")
-    if len(json.dumps(params, separators=(",", ":"), sort_keys=True,
-                          ensure_ascii=False).encode("utf-8")) > MAX_PARAMS_SERIALIZED_BYTES:
+    try:
+        serialized = canonical_json(params).encode("utf-8")
+    except CanonicalJSONError as e:
+        raise InvalidParamsNumber("invalid_params_number: %s" % e)
+    if len(serialized) > MAX_PARAMS_SERIALIZED_BYTES:
         raise InvalidParamsSize("invalid_params_size")
     for k, v in params.items():
         if v is None:
@@ -323,6 +356,18 @@ def _utf8_len(s: str) -> int:
     return len(s.encode("utf-8"))
 
 
+def _jcs_octets(cp: int) -> int:
+    """JCS (RFC 8785 §3.2.2.2) octet length of one decoded character: `"`, `\\`
+    and the control shortcuts `\\b \\f \\n \\r \\t` escape as two octets, any
+    other control character as `\\u00xx` (six), and everything else (`&`, `<`,
+    `>`, non-ASCII, astral) is emitted raw as its UTF-8 encoding."""
+    if cp in (0x22, 0x5C) or cp in (0x08, 0x09, 0x0A, 0x0C, 0x0D):
+        return 2
+    if cp < 0x20:
+        return 6
+    return _utf8_len(chr(cp))
+
+
 def _scan_raw_params(t: str) -> tuple[int, int]:
     r"""Return (max nesting depth, compact octet length) of raw JSON params
     text.  Whitespace outside strings is dropped; string content is measured
@@ -363,11 +408,11 @@ def _scan_raw_params(t: str) -> tuple[int, int]:
                         consumed = 12
                     elif 0xDC00 <= cp <= 0xDFFF:
                         raise CanonicalJSONError("invalid_params_number: lone surrogate escape")
-                    length += 2 if cp < 0x20 else _utf8_len(chr(cp))
+                    length += _jcs_octets(cp)
                     i += consumed
                     continue
                 dec = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}.get(nxt, nxt)
-                length += 2 if ord(dec) < 0x20 else _utf8_len(dec)
+                length += _jcs_octets(ord(dec))
                 i += 2
                 continue
             if ch == '"':

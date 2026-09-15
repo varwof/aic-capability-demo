@@ -73,8 +73,15 @@ export const RECOGNIZED_CONSTRAINT_IDENTITIES = new Set(
 // inputs still read fine.)
 // (rev CLC-1.6 · 2026-09-14: `jcs-sha256` is a real RFC 8785 implementation.
 // The material projection digest and `clc-action:` identifier change for
-// material containing `&`, `<` or `>`; CLC-1.4/1.5 inputs still read.)
-export const CLC_REVISION = 'CLC-1.6';
+// material containing `&`, `<` or `>`; the decoded params path refuses
+// malformed Unicode (lone surrogates / invalid UTF-8) with
+// invalid_params_number and counts the §6.2 size in JCS bytes, not a
+// deserializer's re-encoding; the raw params size counts the JCS (RFC 8785
+// §3.2.2.2) octets of every decoded character — `"`, `\` and the control
+// shortcuts escape as two, every other control as `\u00xx` (six), and
+// `&`/`<`/`>`/U+2028/U+2029/non-ASCII stay raw — and includes both string
+// quotes, so the raw and decoded limits agree; CLC-1.4/1.5 inputs still read.)
+export const CLC_REVISION = 'CLC-1.7';
 // §6.2 step 4: bounds on the JCS-serialized params form.
 export const MAX_PARAMS_SERIALIZED_BYTES = 512;
 export const MAX_PARAMS_NESTING = 32;
@@ -89,6 +96,21 @@ export const VERDICT_ALLOW_UNRESOLVED = 'allow_unresolved';
 // the canonical serialization in octets, never in UTF-16 code units.
 function utf8Len(s: string): number {
     return new TextEncoder().encode(s).length;
+}
+
+// jcsOctets: JCS (RFC 8785 §3.2.2.2) octet length of one decoded character:
+// `"`, `\` and the control shortcuts \b \f \n \r \t escape as two octets, any
+// other control character as `\u00xx` (six), and everything else (&, <, >,
+// non-ASCII, astral) is emitted raw as its UTF-8 encoding.  The raw-path size
+// cap uses this so it agrees with the decoded path.
+function jcsOctets(cp: number): number {
+    if (cp === 0x22 || cp === 0x5c || (cp >= 0x08 && cp <= 0x0d && cp !== 0x0b)) {
+        return 2;
+    }
+    if (cp < 0x20) {
+        return 6;
+    }
+    return utf8Len(String.fromCharCode(cp));
 }
 
 // isPlainObject: value is a JSON object, not an array, not null.
@@ -158,10 +180,50 @@ function rejectNonFinite(value: unknown): void {
     else if (isPlainObject(value)) { Object.values(value).forEach(rejectNonFinite); }
 }
 
+// rejectUnpairedSurrogates: refuse lone UTF-16 surrogates anywhere in a
+// decoded params structure (rev CLC-1.6).  A lone surrogate has no UTF-8 form
+// and no JCS encoding (RFC 8785 §3.2.2.2); `JSON.stringify` would escape it
+// and `TextEncoder` would silently repair it to U+FFFD.  It must produce the
+// same stable denial (invalid_params_number) as the raw boundary check, before
+// any serialization.
+function rejectUnpairedSurrogates(value: unknown): void {
+    if (typeof value === 'string') {
+        rejectUnpairedSurrogateString(value, '');
+        return;
+    }
+    if (Array.isArray(value)) { value.forEach(rejectUnpairedSurrogates); }
+    else if (isPlainObject(value)) {
+        for (const k of Object.keys(value)) {
+            rejectUnpairedSurrogateString(k, k);
+            rejectUnpairedSurrogates(value[k]);
+        }
+    }
+}
+
+function rejectUnpairedSurrogateString(s: string, key: string): void {
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c >= 0xd800 && c <= 0xdbff) {
+            const next = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+            if (next < 0xdc00 || next > 0xdfff) {
+                throw new SemanticsError(key ? `invalid_params_number: lone surrogate in key ${JSON.stringify(key)}`
+                                            : 'invalid_params_number: lone surrogate');
+            }
+            i++;
+            continue;
+        }
+        if (c >= 0xdc00 && c <= 0xdfff) {
+            throw new SemanticsError(key ? `invalid_params_number: lone surrogate in key ${JSON.stringify(key)}`
+                                        : 'invalid_params_number: lone surrogate');
+        }
+    }
+}
+
 export function validateParams(params?: Record<string, unknown> | null): void {
     if (!params) {
         return;
     }
+    rejectUnpairedSurrogates(params);
     if (paramsDepth(params, 1) > MAX_PARAMS_NESTING) {
         throw new SemanticsError('invalid_params_size');
     }
@@ -259,9 +321,10 @@ function scanRawParams(raw: string, strict: boolean): { value: unknown; compact:
     };
 
     const parseString = (): string => {
-        // caller positioned on the opening '"'
+        // Caller positioned on the opening '"'.
         let out = '';
         i++; // opening quote
+        compact += 2; // the surrounding quotes are two serialized octets each
         while (i < t.length) {
             const ch = t[i];
             if (ch === '"') {
@@ -313,16 +376,14 @@ function scanRawParams(raw: string, strict: boolean): { value: unknown; compact:
                             fail(); // lone low surrogate
                         }
                         out += String.fromCharCode(hi);
-                        compact += hi < 0x20 ? 2 : utf8Len(String.fromCharCode(hi));
+                        compact += jcsOctets(hi);
                         i += 6;
                         continue;
                     }
                     default: fail();
                 }
                 const decodedChar = out.slice(-1);
-                compact += decodedChar.charCodeAt(0) < 0x20
-                    ? 2
-                    : utf8Len(decodedChar);
+                compact += jcsOctets(decodedChar.charCodeAt(0));
                 i += 2;
                 continue;
             }
