@@ -223,6 +223,12 @@ export function validateParams(params?: Record<string, unknown> | null): void {
     if (!params) {
         return;
     }
+    if (!isPlainObject(params)) {
+        // §6.2: params must be an object; a top-level array or scalar is the
+        // same stable denial as unparsable JSON, checked before the caps so
+        // all three implementations agree on invalid_params_number.
+        throw new SemanticsError('invalid_params_number');
+    }
     rejectUnpairedSurrogates(params);
     if (paramsDepth(params, 1) > MAX_PARAMS_NESTING) {
         throw new SemanticsError('invalid_params_size');

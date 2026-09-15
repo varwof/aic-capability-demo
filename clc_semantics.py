@@ -189,6 +189,12 @@ def validate_params(params: Optional[dict]) -> None:
     check (layer order)."""
     if params is None:
         return
+    if not isinstance(params, dict):
+        # §6.2: params must be an object; anything else (top-level array,
+        # scalar, ...) is the same stable denial as unparsable JSON.  Checked
+        # before the depth/size caps so all three implementations report
+        # invalid_params_number rather than one of them reporting a size code.
+        raise InvalidParamsNumber("invalid_params_number")
     _reject_non_finite(params)
     _reject_unpaired_surrogates(params)
 
@@ -352,8 +358,13 @@ def revision_compatible(input_revision: str) -> bool:
 
 def _utf8_len(s: str) -> int:
     """UTF-8 octet length of one source character (§6.2 measures octets, not
-    code points or UTF-16 code units)."""
-    return len(s.encode("utf-8"))
+    code points or UTF-16 code units).  A lone surrogate has no UTF-8 form;
+    it is refused with the same stable denial as the escape-level check rather
+    than surfacing as UnicodeEncodeError (rev CLC-1.7)."""
+    try:
+        return len(s.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise InvalidParamsNumber("invalid_params_number: lone surrogate in input")
 
 
 def _jcs_octets(cp: int) -> int:
