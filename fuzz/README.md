@@ -82,8 +82,13 @@ the prompt skeleton):
   the implementation, replacing `raw`.  Used for literal-invalid-UTF-8 raw text
   (e.g. `{"s":"\xff"}`), which a UTF-8 JSONL document cannot carry.  Python
   decodes these via `surrogateescape`; Go passes the bytes as a Go string;
-  TypeScript `Buffer.toString('ascii')` maps high bytes to `?` (documented
-  representability limitation, affecting only those corpus cases).
+  TypeScript `Buffer.toString('ascii')` maps high bytes to `?`.
+
+  **These cases are not a cross-implementation comparison.**  The three runners
+  hand the same octets to three different string types, so any verdict split on
+  this sub-axis says how a language can be made to accept bytes, not what the
+  decision functions decide.  Read them as "not testable for this binding",
+  never as a divergence or a fail-open.
 
 ## Result format
 

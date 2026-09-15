@@ -75,17 +75,21 @@ deterministic for a fixed seed. Determinism is total and verified.
 
 | class | unique cases | impl-rows | axes |
 |-------|--------------|-----------|------|
-| cross_impl (decoded path) | 2,047 | | a03 |
-| cross_impl (raw path) | 256 | | a03 |
-| cross_impl (value digest) | 164 | | a03 |
+| cross_impl (decoded path) | 2,047 | | a03: 1,791 lone surrogates (F1), 256 `raw_b64` (F2) |
+| cross_impl (raw path) | 256 | | a03 `raw_b64` (F2) |
+| cross_impl (value digest) | 164 | | a03 `raw_b64` (F2) |
 | cross_path (designed) | 12,617 | 33,849 | a02 10,000, a03 2,047, a04 570 |
 | unstable | 0 | | - |
 | canonical_sha256 mismatch | 0 | | |
 
 Delta: axis a08 disappears from every class. The 708 reason-code splits
 (`invalid_params_number` vs `invalid_params_size`) and the 1,003 Python crashes
-are gone, and Python instability reaches zero. What remains is axis a03, for
-two different reasons - F1 and F2 below.
+are gone, and Python instability reaches zero. What remains is axis a03, and it
+is two different things. The 1,791 `raw` cases are a real implementation
+difference (F1). The 256 `raw_b64` cases are not a difference between the
+decision functions at all: each runner has to hand the same octets to a string
+API and can only do so lossily, so the three are not being fed the same thing
+(F2). Only the first should be read as a CLC finding.
 
 ---
 
@@ -93,7 +97,9 @@ two different reasons - F1 and F2 below.
 
 **Class:** cross_impl, decoded path
 **Axis:** a03, lone UTF-16 surrogate escapes in the raw JSON text
-**Count:** 2,047 cases after the fix (1,791 `raw`, 256 `raw_b64`)
+**Count:** 1,791 cases (axes `raw` only). The other 256 decoded-path cases are
+`raw_b64` and belong to F2; they are a harness representability artifact, not a
+Go decision difference.
 **Example ids:** `f020006` (`{"s":"\ud83d"}`), `f020009` (`{"s":"\udc00"}`)
 
 ### Signature
@@ -163,7 +169,8 @@ all three languages.
 **Class:** cross_impl, raw path
 **Axis:** a03, literal invalid UTF-8 octets supplied as `raw_b64`
 **Count:** 256 raw-path cases, the same 256 on the decoded path, and 164 value
-digests
+digests. This whole axis is not an apples-to-apples comparison and is not a CLC
+finding; it is kept in the report so the counts above are not misread.
 **Example id:** `f020028`
 
 ### Signature
@@ -186,20 +193,32 @@ and, for the same 256 cases, on the decoded path:
 
 ### Root cause
 
-A JavaScript string is a sequence of UTF-16 code units and cannot carry an
-invalid UTF-8 octet. The harness decodes `raw_b64` with
-`Buffer.from(rawB64,"base64").toString("ascii")`, which substitutes `?` for
-every high byte, so `validateRawParams` receives a well-formed string and
-allows. Go keeps the bytes exactly (`string(b)`) and Python keeps them through
-`errors="surrogateescape"`; both reject.
+The three runners share one case file, but a case whose input is a sequence of
+bytes cannot be represented the same way in three string-typed APIs:
 
-The TypeScript verdict is a statement about the API shape, not about the
-decision logic: the raw validator has nothing malformed to look at by the time
-it is called. 6.2 raw validation is defined over octets, so an implementation
-in a language whose strings cannot hold them needs a byte-oriented entry point
-(a `Uint8Array`/`Buffer` overload) if it wants to run that check. With the
-current string-only signature, these 256 cases are not a faithful comparison
-for TypeScript and should be read as not testable rather than as allowed.
+| impl | raw_b64 becomes | effect |
+|------|-----------------|--------|
+| Go | `string(b)` - the octets, unchanged | raw validator sees the bad octet |
+| Python | `bytes.decode("utf-8", errors="surrogateescape")` | raw validator sees a lone surrogate |
+| TypeScript | `Buffer.toString("ascii")` - `?` for every high byte | raw validator sees a well-formed string |
+
+Only Go is holding the actual octets. Python's is a harness convention a real
+caller could plausibly adopt; TypeScript's is lossy by construction, because a
+JS string is a sequence of UTF-16 code units and cannot carry an invalid UTF-8
+octet at all.
+
+So the `raw_b64` sub-axis measures how each language can be made to accept
+bytes, not what each decision function decides. The `deny`/`deny`/`allow` split
+is a consequence of that, and the matching decoded-path split
+(`allow`/`deny`/`allow`) is the same thing one layer later: Go regenerates
+U+FFFD, TypeScript keeps the `?`, Python keeps the surrogate and refuses it.
+Neither split is evidence that the implementations disagree about CLC.
+
+The TypeScript `allow` is therefore not a fail-open in the decision path. It
+is the raw validator having nothing malformed to look at by the time it is
+called. 6.2 raw validation is defined over octets, so a binding whose strings
+cannot hold them needs a byte-oriented entry point (a `Uint8Array`/`Buffer`
+overload) to run that check at all.
 
 The 164 value-digest mismatches are the same cases: TypeScript digests the
 `?`-substituted text, Go digests the U+FFFD-repaired text, and Python produces
@@ -318,9 +337,9 @@ zero unstable.
 a02, a04 and a08 show cross_path only, and a02 and a04 are designed (above).
 a08 is now free of every class after F3.
 
-a03 (malformed Unicode) is the only axis with a real cross_impl finding, and it
-has two causes, F1 and F2, both about what a decoder has already done to the
-input by the time the decision function is reached.
+a03 (malformed Unicode) is the only axis carrying a real cross_impl finding:
+F1, the Go decoded-path repair. The `raw_b64` cases on the same axis (F2) are a
+harness representability artifact and carry no finding.
 
 ## Canonical SHA-256 (value layer)
 
@@ -349,8 +368,9 @@ Rerun step 2 and `diff` the result files to confirm determinism.
   per-case findings in `fuzz-findings.json`, summary in
   `fuzz/findings-summary.json`.
 - Repeatable: fixed seed, deterministic generator, byte-identical reruns.
-- Open: F1 (no decoded-path remedy; a consumer rule is required) and F2 (an API
-  decision for the TypeScript binding). Neither is folded into the designed
-  class.
+- Open: F1 (no decoded-path remedy; a consumer rule is required). F2 is a
+  harness and API question rather than a CLC finding - the TypeScript binding
+  would need a byte-oriented raw entry point before `raw_b64` can be tested
+  against it at all. Neither is folded into the designed class.
 - The corpus and result dumps are generated artifacts and are not committed.
   Only the harness, this report and the summary are.

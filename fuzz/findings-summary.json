@@ -62,7 +62,14 @@
     ],
     "cross_path_unique_ids": 12617,
     "cross_path_impl_rows": 33849,
-    "unstable_count": 0
+    "unstable_count": 0,
+    "cross_impl_split": {
+      "decoded_path_a03_lone_surrogate": 1791,
+      "decoded_path_a03_raw_b64": 256,
+      "raw_path_a03_raw_b64": 256,
+      "value_digest_a03_raw_b64": 164,
+      "note": "raw_b64 cases are a harness representability artifact: each runner feeds the same octets to a different string type (Go bytes, Python surrogateescape, TS ascii). Only the 1791 lone-surrogate cases are a real implementation difference; that is F1."
+    }
   },
   "boundary_after": {
     "N": 2000,
