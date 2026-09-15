@@ -14,6 +14,10 @@
     "after": {
       "aic-capability-demo": "2d3aa9a",
       "register": "unchanged"
+    },
+    "current": {
+      "aic-capability-demo": "raw-boundary fix (CLC-1.8)",
+      "register": "raw-boundary fix (CLC-1.8)"
     }
   },
   "classes": {
@@ -78,5 +82,33 @@
     },
     "unstable_count": 0
   },
-  "determinism": "byte-identical reruns, diff exit 0 (py, ts, go)"
+  "determinism": "byte-identical reruns, diff exit 0 (py, ts, go)",
+  "current": {
+    "corpus_vectors": 113,
+    "cross_impl_by_path": {
+      "decoded_path": 2047,
+      "raw_path": 164,
+      "canonical_sha256": 164
+    },
+    "cross_impl_split": {
+      "decoded_path_a03_lone_surrogate": 1791,
+      "decoded_path_a03_raw_b64": 256,
+      "raw_path_a03_raw_b64": 164,
+      "value_digest_a03_raw_b64": 164,
+      "note": "only the 1791 lone-surrogate cases are a real implementation difference (F1); every raw_b64 case is the F2 harness representability set"
+    },
+    "cross_path_unique_ids": 12617,
+    "cross_path_impl_rows": 33757,
+    "cross_path_by_impl": {
+      "go": 12617,
+      "py": 10570,
+      "ts": 10570
+    },
+    "unstable_count": 0,
+    "fixed_since_previous": {
+      "raw_size_counts_received_number_spelling": "F7, pinned by params-033..038",
+      "typescript_literal_astral_counted_by_utf16_code_unit": "F7",
+      "typescript_accepted_literal_control_character": "F7"
+    }
+  }
 }

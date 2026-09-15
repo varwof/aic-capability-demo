@@ -4,15 +4,21 @@ Seed `20260915`. Case generator `fuzz/gen_cases.py`, harness `fuzz/README.md`.
 
 Two runs over the same 100,000-case file are reported:
 
-| label  | aic-capability-demo | register  |
-|--------|---------------------|-----------|
-| before | `75bc79e` (CLC-1.7) | unchanged |
-| after  | `2d3aa9a`           | unchanged |
+| label | aic-capability-demo | register | corpus |
+|-------|---------------------|----------|--------|
+| before | `75bc79e` (CLC-1.7) | unchanged | 107 vectors |
+| after | `2d3aa9a` | unchanged | 107 vectors |
+| current | raw-boundary fix (CLC-1.8) | raw-boundary fix (CLC-1.8) | 113 vectors |
 
-The only difference between the two runs is commit `2d3aa9a` ("refuse
-non-object params on the decoded path"). Case file, runners and the Go
-implementation are byte-identical across the two runs, so the result sets are
-directly comparable.
+The first two runs differ only by commit `2d3aa9a` ("refuse non-object params on
+the decoded path"). Case file, runners and the Go implementation are
+byte-identical across them, so those two result sets are directly comparable.
+
+The third run adds the raw-boundary fix described in F7: the raw validators
+measure the JCS form of a number instead of the received spelling, TypeScript
+counts a literal astral character by scalar value, and all three refuse a
+literal control character. Its numbers appear under "After the raw-boundary
+fix" below.
 
 `fuzz-findings.json` is the raw comparison dump; it is generated and not
 tracked (~9 MB). `fuzz/findings-summary.json` holds the summary block of the
@@ -71,16 +77,32 @@ deterministic for a fixed seed. Determinism is total and verified.
 | unstable (Python crash) | 1,350 | | a03 347, a08 1,003 |
 | canonical_sha256 mismatch | 0 | | |
 
-### After the fix (`2d3aa9a`)
+### After the decoded-path fix (`2d3aa9a`)
 
 | class | unique cases | impl-rows | axes |
 |-------|--------------|-----------|------|
 | cross_impl (decoded path) | 2,047 | | a03: 1,791 lone surrogates (F1), 256 `raw_b64` (F2) |
-| cross_impl (raw path) | 256 | | a03 `raw_b64` (F2) |
+| cross_impl (raw path) | 256 | | a03 `raw_b64` (F2) and the 92 literal-astral cases F7 fixes |
 | cross_impl (value digest) | 164 | | a03 `raw_b64` (F2) |
 | cross_path (designed) | 12,617 | 33,849 | a02 10,000, a03 2,047, a04 570 |
 | unstable | 0 | | - |
 | canonical_sha256 mismatch | 0 | | |
+
+### After the raw-boundary fix (current)
+
+| class | unique cases | impl-rows | axes |
+|-------|--------------|-----------|------|
+| cross_impl (decoded path) | 2,047 | | a03: 1,791 lone surrogates (F1), 256 `raw_b64` (F2) |
+| cross_impl (raw path) | 164 | | a03 `raw_b64` only (F2) |
+| cross_impl (value digest) | 164 | | a03 `raw_b64` (F2) |
+| cross_path (designed) | 12,617 | 33,757 | a02 10,000, a03 2,047, a04 570 |
+| unstable | 0 | | - |
+| canonical_sha256 mismatch | 0 | | |
+
+The 92 literal-astral cases are gone from both the raw path and the cross-path
+count. After this run the only axis with a cross_impl case is a03, and every
+remaining one is either F1 or the F2 harness set — there is no raw-path finding
+left for text the harness can represent faithfully.
 
 Delta: axis a08 disappears from every class. The 708 reason-code splits
 (`invalid_params_number` vs `invalid_params_size`) and the 1,003 Python crashes
@@ -328,6 +350,69 @@ fix.
 
 ---
 
+---
+
+## F7 (fixed in CLC-1.8) - the raw validators measured the received number spelling
+
+**Class:** boundary inconsistency, found by review rather than by this harness
+**Axis:** a04 (number shapes) crossed with a08 (size cap) - which the corpus
+never generated
+
+### What was wrong
+
+§6.2 step 4 measures the size of the JCS form, but all three raw validators
+counted a number by the length of the token as received. JCS rewrites numbers,
+so the two counts disagree whenever a token is not already canonical - exactly
+at the size cap that means the raw and decoded boundaries can reach opposite
+verdicts on the same input:
+
+| raw params | received | JCS | raw path (before) | decoded path |
+|---|---|---|---|---|
+| `{"n":1e-6,"s":"<494 a>"}` | 511 | 515 | allow | deny `invalid_params_size` |
+| `{"n":1.0,"s":"<498 a>"}` | 514 | 512 | deny `invalid_params_size` | allow |
+| `{"s":"<100×U+1F600>"}` | 408 | 408 | TypeScript deny, Go/Python allow | allow |
+
+The third row is the same defect in the string path: TypeScript's raw scanner
+walked a JS string by UTF-16 code unit, so a literal astral character counted six
+octets instead of four, and a literal control character passed a check that Go
+and Python already refused.
+
+This is an input-boundary inconsistency, not a released authorization bypass: a
+caller that also runs the decoded check still refuses the oversized input. It
+matters because §6.2 names one size and both boundaries are specified to agree
+on it.
+
+### Why this harness missed it
+
+The axes are independent. a04 varies number shapes at a fixed small size, so it
+never approaches the 512-octet cap; a08 pads a string to the cap but always with
+a canonical number token (`1`). The class only exists at the intersection of the
+two, and no axis generates that intersection - which is the general lesson: the
+cross product of two boundary dimensions is a corpus in its own right.
+
+It was found by review (Iman Schrock, 2026-09-15), not by the 100,000 cases.
+
+### Fix
+
+- Go `semantics.go` (`walkParamsValue`, `json.Number`): after the precision
+  check on the received token, write `CanonicalJSON(n)` for a finite value so
+  the size pass counts JCS octets; a non-finite token keeps the received
+  spelling so malformed numbers still report the size code before the number
+  code.
+- Python `clc_semantics.py` (`_scan_raw_params`): match the number token and add
+  `len(_canonical_number(value))` when the value is finite.
+- TypeScript `ts/clc_semantics.ts` (`scanRawParams`): the same canonical length
+  for a finite number, plus the literal-string loop now advances by code point,
+  refuses a control character or lone surrogate, and counts the scalar's UTF-8
+  octets.
+
+### Pinned by the shared corpus
+
+`params-033`-`params-038` in `capability/data/_vectors/clc-v1/vectors.json`, one
+pair per direction plus the literal/escaped astral pair. All three
+implementations declare `CLC-1.8` and pass 113 authorization, 32 evidence and 13
+crosswalk vectors, 1,184 property cases, the edge checks and the JCS checks.
+
 ## Axes with no divergence
 
 a01 (key order), a05 (missing / null / empty), a06 (types), a07 (arrays), a09
@@ -339,7 +424,9 @@ a08 is now free of every class after F3.
 
 a03 (malformed Unicode) is the only axis carrying a real cross_impl finding:
 F1, the Go decoded-path repair. The `raw_b64` cases on the same axis (F2) are a
-harness representability artifact and carry no finding.
+harness representability artifact and carry no finding. a04 carries a cross_path
+split only, and F7 shows why an axis-by-axis corpus is not enough to see the
+whole boundary: the raw size defect lived where a04 and a08 meet.
 
 ## Canonical SHA-256 (value layer)
 
@@ -372,5 +459,9 @@ Rerun step 2 and `diff` the result files to confirm determinism.
   harness and API question rather than a CLC finding - the TypeScript binding
   would need a byte-oriented raw entry point before `raw_b64` can be tested
   against it at all. Neither is folded into the designed class.
+- Not covered: the axes are varied one at a time, so no axis generates the
+  intersection of two boundary dimensions (F7) and the corpus holds no
+  multi-grant, delegation, evidence or crosswalk case. "All three implementations
+  agree" in this report means the parameter boundary only.
 - The corpus and result dumps are generated artifacts and are not committed.
   Only the harness, this report and the summary are.

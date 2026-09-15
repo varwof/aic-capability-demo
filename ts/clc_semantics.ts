@@ -81,7 +81,7 @@ export const RECOGNIZED_CONSTRAINT_IDENTITIES = new Set(
 // shortcuts escape as two, every other control as `\u00xx` (six), and
 // `&`/`<`/`>`/U+2028/U+2029/non-ASCII stay raw — and includes both string
 // quotes, so the raw and decoded limits agree; CLC-1.4/1.5 inputs still read.)
-export const CLC_REVISION = 'CLC-1.7';
+export const CLC_REVISION = 'CLC-1.8';
 // §6.2 step 4: bounds on the JCS-serialized params form.
 export const MAX_PARAMS_SERIALIZED_BYTES = 512;
 export const MAX_PARAMS_NESTING = 32;
@@ -393,9 +393,19 @@ function scanRawParams(raw: string, strict: boolean): { value: unknown; compact:
                 i += 2;
                 continue;
             }
-            out += ch;
-            compact += utf8Len(ch);
-            i++;
+            // A literal character is measured by Unicode scalar value, not
+            // by UTF-16 code unit: an astral character is one scalar of four
+            // UTF-8 octets, and counting its two halves would double the
+            // count.  A control character or a lone surrogate is not text
+            // JSON can carry unescaped, and Go and Python refuse both.
+            const cp = t.codePointAt(i)!;
+            if (cp < 0x20 || (cp >= 0xd800 && cp <= 0xdfff)) {
+                fail();
+            }
+            const scalar = String.fromCodePoint(cp);
+            out += scalar;
+            compact += utf8Len(scalar);
+            i += scalar.length;
         }
         fail();
     };
@@ -520,7 +530,11 @@ function scanRawParams(raw: string, strict: boolean): { value: unknown; compact:
             i++;
         }
         const lit = t.slice(start, i);
-        compact += lit.length;
+        // §6.2 step 4 counts JCS bytes, and JCS rewrites the token: 1e-6
+        // becomes 0.000001 and 1.0 becomes 1.  The received token is still
+        // what the precision check below sees.
+        const number = Number(lit);
+        compact += Number.isFinite(number) ? JSON.stringify(number).length : lit.length;
         if (strict) {
             checkParamsNumber(lit);
         }

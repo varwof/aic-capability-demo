@@ -110,7 +110,7 @@ RECOGNIZED_CONSTRAINT_IDENTITIES = {
 # shortcuts escape as two, every other control as `\u00xx` (six), and
 # `&`/`<`/`>`/U+2028/U+2029/non-ASCII stay raw — so the raw and decoded
 # limits agree; CLC-1.4/1.5 inputs still read.)
-CLC_REVISION = "CLC-1.7"
+CLC_REVISION = "CLC-1.8"
 # §6.2 step 4: bounds on the JCS-serialized params form.
 MAX_PARAMS_SERIALIZED_BYTES = 512
 MAX_PARAMS_NESTING = 32
@@ -379,6 +379,9 @@ def _jcs_octets(cp: int) -> int:
     return _utf8_len(chr(cp))
 
 
+_RAW_NUMBER_TOKEN = re.compile(r'-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?')
+
+
 def _scan_raw_params(t: str) -> tuple[int, int]:
     r"""Return (max nesting depth, compact octet length) of raw JSON params
     text.  Whitespace outside strings is dropped; string content is measured
@@ -441,6 +444,19 @@ def _scan_raw_params(t: str) -> tuple[int, int]:
         elif ch in "}]":
             depth = max(0, depth - 1)
             length += 1
+        elif ch in "-0123456789":
+            token = _RAW_NUMBER_TOKEN.match(t, i)
+            if token is not None:
+                lit = token.group(0)
+                num = float(lit)
+                # §6.2 step 4 measures the JCS form, and JCS rewrites the
+                # token: 1e-6 becomes 0.000001 and 1.0 becomes 1.  The
+                # received token still drives the precision check below.
+                length += (len(_canonical_number(num)) if math.isfinite(num)
+                           else _utf8_len(lit))
+                i = token.end()
+                continue
+            length += _utf8_len(ch)
         elif ch not in " \t\n\r":
             length += _utf8_len(ch)
         i += 1
