@@ -69,6 +69,7 @@ python3 scenario-demo.py --scenario mcp --principal-cert principal.pem \
 | `clc_semantics.py` / `vectors-run.py` / `property_test.py` | Python CLC-v1 implementation + vectors runner + P11 property runner |
 | `ts/` | TypeScript CLC-v1 implementation + the same two runners (Node-only, zero npm deps) |
 | `clc-v1-parity-report.md` | Cross-implementation parity record |
+| `fuzz/` + `fuzz-divergence-report.md` | Deterministic differential fuzz across the three implementations (behavior, not just pass/fail) |
 
 ## 4. Verification matrices (all pass)
 
@@ -137,8 +138,9 @@ python3 jcs_check.py && node --experimental-strip-types ts/jcs_check.ts
 ```
 
 Corpora (in `varwof/capability`, `data/_vectors/clc-v1/`): `vectors.json`
-(105 vectors, incl. the rev CLC-1.3 `allow_unresolved` verdict and §9.3
-multi-grant aggregation), `property-cases.json` (1184 deterministic P11
+(107 authorization vectors, incl. the rev CLC-1.3 `allow_unresolved` verdict
+and §9.3 multi-grant aggregation), `evidence-vectors.json` (32),
+`crosswalk-vectors.json` (13), `property-cases.json` (1184 deterministic P11
 cases), `offline-vectors.json` (OCMP reference cases).
 
 Why three: a language is only as strong as the agreement between independent
@@ -148,3 +150,26 @@ followed (boolean-exactness, layer-6-before-layer-7, layer-1 code
 propagation).  The parity record is in `clc-v1-parity-report.md`; the CI in
 `.github/workflows/clc-conformance.yml` clones `varwof/capability` and runs
 `py_compile`, the vectors and the property suite on every push and PR.
+
+## 9. Differential fuzz (behavioral parity)
+
+The vectors above assert that the three implementations produce the *same
+answer*.  The fuzz harness asks the harder question: on inputs nobody wrote a
+vector for, do they still behave the same, including the reason codes and the
+value layer?
+
+```bash
+python3 fuzz/gen_cases.py --n 100000 --seed 20260915 > /tmp/cases.jsonl
+python3 fuzz/run_py.py /tmp/cases.jsonl > /tmp/res_py.jsonl
+npx --yes tsx fuzz/run_ts.ts /tmp/cases.jsonl > /tmp/res_ts.jsonl
+(cd ../register && go run ./semantics/fuzz_runner /tmp/cases.jsonl > /tmp/res_go.jsonl)
+python3 fuzz/compare.py /tmp/cases.jsonl /tmp/res_py.jsonl /tmp/res_ts.jsonl /tmp/res_go.jsonl
+```
+
+The corpus is seed-deterministic and covers ten axes (key order, duplicate
+keys, malformed escapes and lone surrogates, number shapes, missing/null/empty,
+types, arrays, size and depth caps, constraint identity, id shapes).
+`fuzz-divergence-report.md` holds the result at the current pin, including the
+findings that are still open.  A raw/decoded boundary difference inside one
+implementation is CLC §6.2 working as designed, not a divergence; the report
+separates the two so the counts are not read the wrong way.
