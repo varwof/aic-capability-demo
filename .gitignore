@@ -2,3 +2,6 @@ bin/
 deps/
 __pycache__/
 *.pyc
+# generated fuzz artifacts (10万条 dump 不入库)
+fuzz-findings.json
+*.jsonl

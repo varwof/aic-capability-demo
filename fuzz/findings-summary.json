@@ -1,0 +1,75 @@
+{
+  "seed": 20260915,
+  "generator": "fuzz/gen_cases.py",
+  "corpus": {
+    "main": 100000,
+    "boundary": 2000,
+    "axes": "a01-a10, 10000 cases each"
+  },
+  "pins": {
+    "before": {
+      "aic-capability-demo": "75bc79e",
+      "register": "unchanged"
+    },
+    "after": {
+      "aic-capability-demo": "2d3aa9a",
+      "register": "unchanged"
+    }
+  },
+  "classes": {
+    "cross_impl": "same input, same path, verdict or reason differs across impls",
+    "cross_path": "raw boundary vs decoded boundary inside one impl (CLC 6.2, designed, not a divergence)",
+    "unstable": "an impl crashed or produced no decision where others decided"
+  },
+  "before": {
+    "cross_impl_by_path": {
+      "decoded_path": 2499
+    },
+    "cross_impl_reason": [
+      {
+        "divergent_reasons": [
+          "",
+          "invalid_params_number"
+        ],
+        "count": 1791
+      },
+      {
+        "divergent_reasons": [
+          "invalid_params_number",
+          "invalid_params_size"
+        ],
+        "count": 708
+      }
+    ],
+    "cross_path_unique_ids": 13069,
+    "cross_path_impl_rows": 34917,
+    "unstable_count": 1350
+  },
+  "after": {
+    "cross_impl_by_path": {
+      "decoded_path": 2047,
+      "raw_path": 256,
+      "canonical_sha256": 164
+    },
+    "cross_impl_reason": [
+      {
+        "divergent_reasons": [
+          "",
+          "invalid_params_number"
+        ],
+        "count": 2303
+      }
+    ],
+    "cross_path_unique_ids": 12617,
+    "cross_path_impl_rows": 33849,
+    "unstable_count": 0
+  },
+  "boundary_after": {
+    "N": 2000,
+    "cross_impl_by_path": {
+      "decoded_path": 6
+    },
+    "unstable_count": 0
+  },
+  "determinism": "byte-identical reruns, diff exit 0 (py, ts, go)"
+}
