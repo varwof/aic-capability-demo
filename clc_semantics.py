@@ -80,6 +80,13 @@ class CanonicalJSONError(CLCError):
     pass
 
 
+# Largest int exactly convertible to IEEE-754 binary64 without raising
+# OverflowError: float64 max finite value ≈ 2**1024 (≈1.8e308).  Python
+# raises OverflowError for abs(int) beyond it during float() (audit
+# 2026-09-16, R4); the JCS boundary is the same as any other impl.
+_MAX_FLOAT64_INT = sys.float_info.max
+
+
 # Verdicts (rev CLC-1.3: allow_unresolved is the independent verdict for
 # recognized-but-unevaluated constraint obligations, §8.4).
 VERDICT_ALLOW = "allow"
@@ -141,7 +148,9 @@ def validate_capability_id(cid: str) -> None:
         raise InvalidCapabilityID("invalid_capability_id")
 
     # §3 scheme grammar: vendor "/" product "-v" major (rev CLC-1.2).
-    if not re.match(r"^[A-Za-z0-9-]+/[A-Za-z0-9-]+-v[0-9]+$", parts[0]):
+    # fullmatch (not a $ anchor): $ allows a trailing newline, and a
+    # capability id with a stray "\n" must not be accepted (audit R13).
+    if not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9-]+-v[0-9]+", parts[0]):
         raise InvalidCapabilityID("invalid_capability_id")
 
 
@@ -308,6 +317,12 @@ def canonical_json(value: Any) -> str:
     if isinstance(value, str):
         return _jcs_escape_string(value)
     if isinstance(value, int):  # bool is handled above
+        # RFC 8785 §3.2.2.3 canonicalizes via IEEE-754 binary64.  An int beyond
+        # the float64 range (|x| > 2**1024, or ~1.8e308) cannot round-trip and
+        # float() would raise an uncaught OverflowError (audit 2026-09-16, R4).
+        # Reject it as a non-canonical number instead of crashing.
+        if value != 0 and (value > _MAX_FLOAT64_INT or value < -_MAX_FLOAT64_INT):
+            raise CanonicalJSONError('canonical_invalid_number')
         return _canonical_number(float(value))
     if isinstance(value, float):
         return _canonical_number(value)
@@ -645,6 +660,24 @@ def value_subset(op_val: Any, grant_val: Any) -> tuple[bool, str]:
     if grant_val is None:
         return False, "empty_bound_denies_class"
 
+    if isinstance(grant_val, list):
+        # v1.1 enum semantics: an array-valued grant parameter is the set
+        # of allowed values. The request may supply a scalar (must equal a
+        # member) or an array (every element must equal a member). Numbers
+        # inside the set are exact values, not bounds. An explicitly empty
+        # grant set denies the class.  Dispatch on the GRANT type,
+        # mirroring TypeScript/Go: a boolean op scalar against an enum
+        # grant is not_in_enum (not params_exceed_grant), even though
+        # Python's bool-is-int makes the bool branch below tempting —
+        # audit 2026-09-16, R6 cross-impl reason fidelity.
+        if len(grant_val) == 0:
+            return False, "empty_bound_denies_class"
+        elems = op_val if isinstance(op_val, list) else [op_val]
+        for o in elems:
+            if o not in grant_val:
+                return False, "not_in_enum"
+        return True, ""
+
     # Booleans are exact and are NOT numbers (CLC-v1 §6.2): `True` must not be
     # satisfied by `1`.  Python makes bool a subclass of int, so this branch has
     # to come before the numeric one — otherwise `1 <= True` and the grant
@@ -668,29 +701,25 @@ def value_subset(op_val: Any, grant_val: Any) -> tuple[bool, str]:
             return False, "params_exceed_grant"
         return True, ""
 
-    if isinstance(grant_val, list):
-        # v1.1 enum semantics: an array-valued grant parameter is the set
-        # of allowed values. The request may supply a scalar (must equal a
-        # member) or an array (every element must equal a member). Numbers
-        # inside the set are exact values, not bounds. An explicitly empty
-        # grant set denies the class.
-        if len(grant_val) == 0:
-            return False, "empty_bound_denies_class"
-        elems = op_val if isinstance(op_val, list) else [op_val]
-        for o in elems:
-            if o not in grant_val:
-                return False, "not_in_enum"
-        return True, ""
-
     if isinstance(grant_val, dict):
         if not isinstance(op_val, dict):
             return False, "params_exceed_grant"
+        if len(grant_val) == 0:
+            # rev CLC-1.3: an empty params object is unconstrained (§9.3),
+            # at every nesting depth — it declares no keys, no closure.
+            return True, ""
         for k, gvv in grant_val.items():
             if k not in op_val:
                 return False, "params_missing"
             ok, reason = value_subset(op_val[k], gvv)
             if not ok:
                 return False, reason
+        # §9.3 layer 7 (request side): key closure recurses — every op key
+        # inside a nested object must be declared by the grant key (audit
+        # 2026-09-16, R16), resolved after the missing-key check above.
+        for k in op_val:
+            if k not in grant_val:
+                return False, f"undeclared_param: {k}"
         return True, ""
 
     # Exact equality
@@ -722,14 +751,18 @@ def entails(grant: dict, op: dict) -> dict:
     if not ok:
         return {"entails": False, "reason": reason}
 
-    # §5.3 step 3: grant params absent OR empty → true (unconstrained;
-    # rev CLC-1.3 §9.3 makes {} ≡ absent).
-    if not grant.get("params"):
+    # §5.3 step 3: grant params absent OR the empty OBJECT {} → true
+    # (unconstrained; rev CLC-1.3 §9.3 makes {} ≡ absent).  Only absence
+    # and {} count: a falsy scalar or an array must NOT be treated as
+    # unconstrained — that was a fail-open (audit 2026-09-16, R6); such a
+    # grant is invalid_params_number below.
+    gp = grant.get("params")
+    if gp is None or gp == {}:
         return {"entails": True}
 
     # Validate null values
     try:
-        validate_params(grant.get("params"))
+        validate_params(gp)
     except CLCError as e:
         return {"entails": False, "reason": str(e)}
 
@@ -743,7 +776,7 @@ def entails(grant: dict, op: dict) -> dict:
         return {"entails": False, "reason": "params_missing"}
 
     # §5.3 step 5: params subset
-    ok, reason = params_subset(op.get("params"), grant.get("params"))
+    ok, reason = params_subset(op.get("params"), gp)
     if not ok:
         return {"entails": False, "reason": reason}
 
@@ -962,13 +995,26 @@ def _is_strict_json_integer(s: str) -> bool:
 _MAX_TIME_WINDOWS = 32
 _MAX_CIDR_LIST = 32
 
-_TIME_OF_DAY_RE = re.compile(r"^([01]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$")
+_TIME_OF_DAY_RE = re.compile(r"^([01]?[0-9]|2[0-3]):([0-5][0-9])(:([0-5][0-9]))?$")
 
 
 def _seconds_of_day(t: str) -> int:
-    h, m = (int(p) for p in t.split(":")[:2])
-    s = int(t.split(":")[2]) if ":" in t[5:] else 0
+    h, m, s = _parse_hms(t)
     return h * 3600 + m * 60 + s
+
+
+def _parse_hms(t: str) -> tuple[int, int, int]:
+    """Split a time-of-day into (h, m, s).  The caller has already matched
+    it against _TIME_OF_DAY_RE; index math on the raw string (e.g. a ":" in
+    t[5:]) assumes a two-digit hour and silently drops seconds for
+    single-digit hours like "9:30:15" (audit 2026-09-16, R14), so parse
+    from the split segments instead."""
+    m = _TIME_OF_DAY_RE.match(t)
+    assert m is not None, f"unmatched time-of-day {t!r}"
+    h = int(m.group(1))
+    minute = int(m.group(2))
+    sec = int(m.group(4)) if m.group(3) is not None else 0
+    return h, minute, sec
 
 
 def _valid_time_window_json(raw: str) -> bool:
@@ -1058,12 +1104,27 @@ def _valid_cidr_list_json(raw: str) -> bool:
 def _is_params_level_reason(reason: str) -> bool:
     """Report whether an entailment failure is a params-level reason
     (propagated by authorize) rather than an ID-level reason (collapsed
-    to capability_not_authorized per CLC-v1 §9 step 3)."""
-    return reason in {"params_missing", "undeclared_param", "params_exceed_grant",
-                      "empty_bound_denies_class", "not_in_enum",
-                      "invalid_params_duplicate_key", "invalid_params_number",
-                      "invalid_params_size", "unsupported_language_revision"} \
-        or reason.startswith("invalid_params_null") or reason.startswith("undeclared_param")
+    to capability_not_authorized per CLC-v1 §9 step 3).
+
+    Every params-level reason code is matched as a PREFIX, not an exact
+    set: the languages attach a ": <detail>" suffix (e.g.
+    ``invalid_params_number: lone surrogate U+D800``), and an exact-set
+    match would silently mis-sort those to capability_not_authorized in
+    Python while TypeScript's prefix match returned the params reason
+    (audit 2026-09-16, R12).  The two implementations must agree code for
+    code."""
+    return reason.startswith((
+        "params_missing",
+        "undeclared_param",
+        "params_exceed_grant",
+        "empty_bound_denies_class",
+        "not_in_enum",
+        "invalid_params_null",
+        "invalid_params_duplicate_key",
+        "invalid_params_number",
+        "invalid_params_size",
+        "unsupported_language_revision",
+    ))
 
 
 def authorize(effective_grant: dict, op: dict) -> dict:

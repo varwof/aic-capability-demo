@@ -36,13 +36,79 @@ function canon(reason?: string): string {
 // authorize runs the decision layer.  Only SemanticsError is a clean denial;
 // any other exception (e.g. TypeError on non-object params) is a crash and is
 // intentionally propagated so it is recorded as an "unstable" incident.
-function authorize(grant: unknown, op: unknown): { verdict: string; reason: string } {
-    const d = authorizeSet([grant as never], op as never);
-    return { verdict: d.verdict, reason: canon(d.reason) };
+function authorize(grants: unknown[], op: unknown): { verdict: string; reason: string; unresolved?: string[] } {
+    const d = authorizeSet(grants as never[], op as never);
+    const out: { verdict: string; reason: string; unresolved?: string[] } = {
+        verdict: d.verdict,
+        reason: canon(d.reason),
+    };
+    if (d.unresolved && d.unresolved.length > 0) {
+        out.unresolved = d.unresolved;
+    }
+    return out;
 }
 
 function decodeRaw(raw: string): unknown {
     return JSON.parse(raw);
+}
+
+// Mirror Python's surrogateescape so invalid UTF-8 bytes are preserved as
+// lone surrogates (U+DC00+byte) rather than Latin-1 chars or U+FFFD.  This
+// keeps the three runners comparing the same logical byte stream.
+function decodeUtf8SurrogateEscape(buf: Buffer): string {
+    const out: string[] = [];
+    const n = buf.length;
+    for (let i = 0; i < n; ) {
+        const b = buf[i];
+        if (b < 0x80) {
+            out.push(String.fromCharCode(b));
+            i++;
+            continue;
+        }
+        let len = 0;
+        let code = 0;
+        if ((b & 0xe0) === 0xc0) { len = 2; code = b & 0x1f; }
+        else if ((b & 0xf0) === 0xe0) { len = 3; code = b & 0x0f; }
+        else if ((b & 0xf8) === 0xf0) { len = 4; code = b & 0x07; }
+        if (len === 0 || i + len > n) {
+            out.push(String.fromCharCode(0xdc00 + b));
+            i++;
+            continue;
+        }
+        let ok = true;
+        for (let j = 1; j < len; j++) {
+            const cb = buf[i + j];
+            if ((cb & 0xc0) !== 0x80) { ok = false; break; }
+            code = (code << 6) | (cb & 0x3f);
+        }
+        if (!ok) {
+            out.push(String.fromCharCode(0xdc00 + b));
+            i++;
+            continue;
+        }
+        const min = len === 2 ? 0x80 : len === 3 ? 0x800 : 0x10000;
+        if (code < min || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
+            out.push(String.fromCharCode(0xdc00 + b));
+            i++;
+            continue;
+        }
+        if (code <= 0xffff) {
+            out.push(String.fromCharCode(code));
+        } else {
+            const c = code - 0x10000;
+            out.push(String.fromCharCode(0xd800 + (c >> 10), 0xdc00 + (c & 0x3ff)));
+        }
+        i += len;
+    }
+    return out.join('');
+}
+
+function effectiveGrants(caseObj: Record<string, unknown>): unknown[] {
+    const g = caseObj['grants'];
+    if (Array.isArray(g)) {
+        return g as unknown[];
+    }
+    return [caseObj['grant']];
 }
 
 function evalCase(caseObj: Record<string, unknown>): Record<string, unknown> {
@@ -52,10 +118,10 @@ function evalCase(caseObj: Record<string, unknown>): Record<string, unknown> {
     const rawB64 = caseObj['raw_b64'] as string | undefined;
     let rawText = raw ?? '';
     if (rawB64 !== undefined) {
-        rawText = Buffer.from(rawB64, 'base64').toString('ascii');
+        rawText = decodeUtf8SurrogateEscape(Buffer.from(rawB64, 'base64'));
     }
     const opId = String(caseObj['op_id']);
-    const grant = caseObj['grant'] as unknown;
+    const grant = effectiveGrants(caseObj);
 
     const out: Record<string, unknown> = { id: cid, impl: 'ts' };
 

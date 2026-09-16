@@ -94,13 +94,24 @@ def main():
                     "raw": r["raw_path"], "decoded": r["decoded_path"],
                 })
 
-        # cross-impl per path + canonical digest
+        # cross-impl per path + canonical digest + unresolved consistency
         for p in PATHS:
             keys = {name: path_key(rows[name][p]) for name in impls}
             if len(set(keys.values())) > 1:
                 cross_impl.append({
                     "id": cid, "path": p, "axis": axis_of.get(cid, "unknown"),
                     "keys": {name: list(k) for name, k in keys.items()},
+                })
+            # allow_unresolved residual-obligation lists must be byte-identical
+            ur = {
+                name: tuple(rows[name][p].get("unresolved") or [])
+                for name in impls
+            }
+            if any(u for u in ur.values()) and len(set(ur.values())) > 1:
+                cross_impl.append({
+                    "id": cid, "path": p + "/unresolved",
+                    "axis": axis_of.get(cid, "unknown"),
+                    "keys": {name: list(u) for name, u in ur.items()},
                 })
         shas = {name: rows[name].get("canonical_sha256", "") for name in impls}
         real = [s for s in shas.values() if s]

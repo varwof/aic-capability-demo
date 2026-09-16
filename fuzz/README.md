@@ -24,10 +24,10 @@ order, number repr, Unicode normalization) is checked byte-for-byte.  It is
 
 | file          | role                                                        |
 |---------------|-------------------------------------------------------------|
-| `gen_cases.py`| deterministic, axis-directed case generator (10 axes a01-a10) |
+| `gen_cases.py`| deterministic, axis-directed case generator (15 axes a01-a15) |
 | `run_py.py`   | Python runner → result JSONL                                 |
 | `run_ts.ts`   | TypeScript runner (tsx / node strip-types) → result JSONL    |
-| `run_go.go`   | Go runner (`register/semantics/fuzz_runner/main.go`)         |
+| Go runner     | `register/semantics/fuzz_runner/main.go`                     |
 | `compare.py`  | cross-impl + cross-path + unstable classification            |
 | `shrink.py`   | ddmin minimizer for a recorded finding                       |
 
@@ -74,6 +74,10 @@ JSONL, one case per line:
 `null` / `{}` (absent grant).  Optional extensions (documented adjustments to
 the prompt skeleton):
 
+- `grants` — for multi-grant (a11) cases, the full grant array in input order.
+  When present, runners call the multi-grant entry point
+  (`authorize_set`/`authorizeSet`/`AuthorizeSet`) with the whole array; the
+  single `grant` field is kept as a mirror of the first element for compat.
 - `op_id` — the operation capability id (the decision function needs one);
   drawn from a fixed legend of well-formed ids.
 - `no_params: true` — the operation carries **no** params field at all; `raw`
@@ -82,13 +86,14 @@ the prompt skeleton):
   the implementation, replacing `raw`.  Used for literal-invalid-UTF-8 raw text
   (e.g. `{"s":"\xff"}`), which a UTF-8 JSONL document cannot carry.  Python
   decodes these via `surrogateescape`; Go passes the bytes as a Go string;
-  TypeScript `Buffer.toString('ascii')` maps high bytes to `?`.
+  TypeScript now mirrors Python's surrogateescape (`U+DC00+byte` per invalid
+  octet) so all three runners feed the raw validator the same octets.
 
-  **These cases are not a cross-implementation comparison.**  The three runners
-  hand the same octets to three different string types, so any verdict split on
-  this sub-axis says how a language can be made to accept bytes, not what the
-  decision functions decide.  Read them as "not testable for this binding",
-  never as a divergence or a fail-open.
+  With that runner parity the `raw_b64` sub-axis is a genuine (and currently
+  convergent) comparison, not the representability artifact the note below
+  described.  It was a harness bug while TypeScript used `toString('ascii')`,
+  which mapped every high byte to `?` and hid the invalid octet from the TS
+  validator.
 
 ## Result format
 
@@ -97,6 +102,18 @@ the prompt skeleton):
   "raw_path": {"verdict": "deny", "reason": "invalid_params_number"},
   "decoded_path": {"verdict": "deny", "reason": "invalid_params_number"},
   "canonical_sha256": "9a2fe282..." }
+```
+
+An `allow_unresolved` verdict carries the residual obligation set, which the
+compare stage checks byte-for-byte across implementations:
+
+```json
+{ "id": "f053332", "impl": "ts",
+  "raw_path":   {"verdict": "allow_unresolved", "reason": "",
+                 "unresolved": ["varwof/constraint-v1:network:cidr:[\"192.0.2.0/24\"]"]},
+  "decoded_path": {"verdict": "allow_unresolved", "reason": "",
+                 "unresolved": ["varwof/constraint-v1:network:cidr:[\"192.0.2.0/24\"]"]},
+  "canonical_sha256": "..." }
 ```
 
 Reasons are compared as their canonical prefix (everything before the first
@@ -120,6 +137,11 @@ case under **unstable**, not as a clean denial.
 | a08  | size / depth          | JCS-serialized size 512±4 bytes, nesting depth 32±2|
 | a09  | constraint identity   | reserved `varwof/constraint-v1:*` vs unknown       |
 | a10  | id shapes             | well-formed ids, wildcards, bad ids in params/keys |
+| a11  | multi-grant           | 1–4 grants; union allow, allow_unresolved union, denyReasonFirst order |
+| a12  | grant paramsSubset    | grant.params vs op.params: subset, empty, enum, nested, null |
+| a13  | malformed / boundary  | bare scalars, `{}`, deep arrays (≤20k), NUL, control chars, raw bytes |
+| a14  | JCS round-trip numbers| 2^53, 1e21, -0, subnormals, big decimals → canonical digest |
+| a15  | i18n / Unicode edges  | CJK, BMP boundary, astral, combining marks, RTL, BOM, overlong UTF-8 |
 
 The `--boundary` set concentrates ~2000 cases on the a08 size/depth decision
 edges (503–521 JCS bytes, depth 30–34), a02 dup-key pairs, a03 malformed

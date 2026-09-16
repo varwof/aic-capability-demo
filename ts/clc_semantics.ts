@@ -161,7 +161,9 @@ export function validateCapabilityId(id?: string | null): void {
         throw new SemanticsError('invalid_capability_id');
     }
     // §3 scheme grammar: vendor "/" product "-v" major (rev CLC-1.2).
-    if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9-]+-v[0-9]+$/.test(parts[0])) {
+    // A bare $ anchor also matches before a trailing newline; the
+    // (?![\s\S]) end-of-string assertion rejects stray "\n" (audit R13).
+    if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9-]+-v[0-9]+$(?![\s\S])/.test(parts[0])) {
         throw new SemanticsError('invalid_capability_id');
     }
 }
@@ -220,7 +222,12 @@ function rejectUnpairedSurrogateString(s: string, key: string): void {
 }
 
 export function validateParams(params?: Record<string, unknown> | null): void {
-    if (!params) {
+    if (params == null) {
+        // Absent (null/undefined) is unconstrained.  Note the explicit
+        // null-check (not a falsy check): a falsy scalar like 0/""/false is
+        // NOT an absent object — it must be rejected as invalid_params_number
+        // below, mirroring Python (audit 2026-09-16, R5/F8; previously a
+        // falsy scalar slipped through here).
         return;
     }
     if (!isPlainObject(params)) {
@@ -836,6 +843,11 @@ export function valueSubset(
         if (!isPlainObject(opVal)) {
             return [false, 'params_exceed_grant'];
         }
+        if (Object.keys(grantVal).length === 0) {
+            // rev CLC-1.3: an empty params object is unconstrained (§9.3),
+            // at every nesting depth — it declares no keys, no closure.
+            return [true, ''];
+        }
         for (const [k, gvv] of Object.entries(grantVal)) {
             if (!(k in opVal)) {
                 return [false, 'params_missing'];
@@ -843,6 +855,14 @@ export function valueSubset(
             const [ok, reason] = valueSubset(opVal[k], gvv);
             if (!ok) {
                 return [false, reason];
+            }
+        }
+        // §9.3 layer 7 (request side): key closure recurses — every op key
+        // inside a nested object must be declared by the grant key (audit
+        // 2026-09-16, R16), resolved after the missing-key check above.
+        for (const k of Object.keys(opVal)) {
+            if (!(k in grantVal)) {
+                return [false, `undeclared_param: ${k}`];
             }
         }
         return [true, ''];
@@ -938,9 +958,16 @@ export function entails(grant: Grant, op: Operation): MatchResult {
         return { entails: false, reason: idReason };
     }
 
-    // §6.3 step 3: grant params absent OR empty → true (unconstrained; rev
-    // CLC-1.3 §9.3 makes {} ≡ absent).
-    if (grant.params == null || Object.keys(grant.params).length === 0) {
+    // §6.3 step 3: grant params absent OR the empty OBJECT {} → true
+    // (unconstrained; rev CLC-1.3 §9.3 makes {} ≡ absent).  Only absence and
+    // {} count: a falsy scalar or an array must NOT be treated as
+    // unconstrained — that was a fail-open (audit 2026-09-16, R6); such a
+    // grant is invalid_params_number below.
+    if (grant.params == null) {
+        return { entails: true };
+    }
+    const grantParams = grant.params as Record<string, unknown>;
+    if (isPlainObject(grantParams) && Object.keys(grantParams).length === 0) {
         return { entails: true };
     }
 

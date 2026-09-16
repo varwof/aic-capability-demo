@@ -88,7 +88,7 @@ deterministic for a fixed seed. Determinism is total and verified.
 | unstable | 0 | | - |
 | canonical_sha256 mismatch | 0 | | |
 
-### After the raw-boundary fix (current)
+### After the raw-boundary fix (current, R1)
 
 | class | unique cases | impl-rows | axes |
 |-------|--------------|-----------|------|
@@ -98,6 +98,34 @@ deterministic for a fixed seed. Determinism is total and verified.
 | cross_path (designed) | 12,617 | 33,757 | a02 10,000, a03 2,047, a04 570 |
 | unstable | 0 | | - |
 | canonical_sha256 mismatch | 0 | | |
+
+### Expansion round (current, R2 - 15 axes, 99,990 cases)
+
+The repeated ask to broaden the fuzz produced five new axis families - a11
+multi-grant aggregation, a12 grant paramsSubset, a13 malformed/over-boundary
+input, a14 JCS round-trip numbers, a15 i18n/Unicode edges - distributed evenly
+(6,666 each).  The a15 `raw_b64` handling in the TypeScript runner was also
+fixed on the way through this round: it now feeds the raw validator the same
+bytes Python does (surrogateescape, `U+DC00+byte` per invalid octet) instead of
+the old lossy `toString("ascii")`.
+
+| class | unique cases | impl-rows | axes |
+|-------|--------------|-----------|------|
+| cross_impl (decoded path) | 3,303 | | a03 1,363, a15 1,436, a13 504 (incl. F8) |
+| cross_impl (raw path) | 207 | | a13 UTF-8 BOM (F9) |
+| cross_impl (value digest) | 0 | | - |
+| cross_path (designed) | | py 8,150, ts 8,619, go 11,191 | a02 6,666 dup keys, a03/a15/a13, a04 |
+| unstable | 0 | | - |
+| canonical_sha256 mismatch | 0 | | - |
+| allow_unresolved results | 2,068 | | py=ts=go byte-identical |
+
+Two new cross_impl findings survived the harness fixes: F8 (TypeScript
+`validateParams` accepts falsy scalar params `0`/`-0`) and F9 (TypeScript's raw
+validator strips a leading UTF-8 BOM because JS `trim()` treats U+FEFF as
+whitespace).  Both are TypeScript-only and are documented below.  The F2
+`raw_b64` cases no longer diverge: with surrogateescape in the TS runner all
+three implementations see the invalid octet and deny on the raw path, and the
+value digests agree.
 
 The 92 literal-astral cases are gone from both the raw path and the cross-path
 count. After this run the only axis with a cross_impl case is a03, and every
@@ -372,6 +400,105 @@ fix.
 
 ---
 
+## F8 (open, cross_impl) - TypeScript accepts falsy scalar params on the decoded path
+
+**Class:** cross_impl, decoded path
+**Axis:** a13 (malformed / over-boundary input), bare scalar literals `0` and `-0`
+**Count:** 262 decoded-path cases (261 `0`, 1 `-0`). The raw path denies in all
+three implementations.
+**Example ids:** `f080006` (`-0`), `f080059` (`0`)
+
+### Signature
+
+```json
+["decoded_path",
+ {"go": ["deny", "invalid_params_number"],
+  "py": ["deny", "invalid_params_number"],
+  "ts": ["allow", ""]}]
+```
+
+### Root cause
+
+`ts/clc_semantics.ts` `validateParams` (line 222):
+
+```ts
+if (!params) {
+    return;                      // 0, -0, '', null are all falsy → early return
+}
+if (!isPlainObject(params)) {
+    throw new SemanticsError('invalid_params_number');
+}
+```
+
+`0`, `-0`, `''` and `null` are falsy, so the function returns before the
+object-shape check. Go (non-nil, non-map params → deny) and Python
+(non-None, non-dict → deny) disagree on `0`/`-0`; `null` is the designed
+"no params" case and all three agree. Truthy scalars (`1`, `true`, `'x'`) and
+arrays are already denied by all three.
+
+### Impact
+
+Decoded-path `allow` for a whole-operation params value of `0`/`-0`. The
+fail-open direction matters (§9.3 deny-on-any / allow-on-some aggregation), so
+this deserves the same `isPlainObject`-before-falsy ordering the other two
+implementations use:
+
+```ts
+if (params == null) { return; }   // keep the designed "no params" shortcut
+if (!isPlainObject(params)) { throw new SemanticsError('invalid_params_number'); }
+```
+
+### Location
+
+- TypeScript: `ts/clc_semantics.ts` `validateParams:222`.
+
+---
+
+## F9 (open, cross_impl) - TypeScript raw validator strips a leading UTF-8 BOM
+
+**Class:** cross_impl, raw path
+**Axis:** a15 (i18n / Unicode edges), fed via the a13 `raw_b64` BOM template
+(`ef bb bf {"s":1}`) - a UTF-8 BOM followed by a well-formed object
+**Count:** 207 raw-path cases
+**Example id:** `f080009`
+
+### Signature
+
+```json
+["raw_path",
+ {"go": ["deny", "invalid_params_number"],
+  "py": ["deny", "invalid_params_number"],
+  "ts": ["allow", ""]}]
+```
+
+### Root cause
+
+`ts/clc_semantics.ts` `scanRawParams` (line 306) starts with
+
+```ts
+let t = raw.trim();
+```
+
+JavaScript `String.prototype.trim` treats U+FEFF (the BOM) as Unicode
+whitespace, so a leading BOM is silently removed before the
+`t.startsWith('{')` check and the object body validates. Go's raw scanner and
+Python's raw validator both reject the BOM-prefixed text
+(`invalid_params_number`).
+
+### Impact
+
+Raw-path `allow` for a payload that carries a UTF-8 byte-order mark ahead of
+the object. Whether a BOM is welcome at the raw boundary is a spec decision
+(JSON decoders traditionally tolerate it, CLC's 6.2 check historically does
+not) - the divergence is that the three implementations disagree, and TS is the
+leaky one.
+
+### Location
+
+- TypeScript: `ts/clc_semantics.ts` `scanRawParams:306`.
+
+---
+
 ## F7 (fixed in CLC-1.8) - the raw validators measured the received number spelling
 
 **Class:** boundary inconsistency, found by review rather than by this harness
@@ -442,31 +569,40 @@ behaves differently.
 
 ## Axes with no divergence
 
-a01 (key order), a05 (missing / null / empty), a06 (types), a07 (arrays), a09
-(constraint identity), a10 (id shapes): 10,000 cases each, zero cross_impl and
-zero unstable.
+R1 (a01-a10): a01 (key order), a05 (missing / null / empty), a06 (types), a07
+(arrays), a09 (constraint identity), a10 (id shapes): 10,000 cases each, zero
+cross_impl and zero unstable.
 
-a02, a04 and a08 show cross_path only, and a02 and a04 are designed (above).
-a08 is now free of every class after F3.
+R2 (a01-a15): the new axes a11 (multi-grant aggregation), a12 (grant
+paramsSubset), a14 (JCS round-trip numbers) carry **zero** cross_impl, zero
+unstable, and every `allow_unresolved` obligation set is byte-identical across
+py/ts/go - the union semantics and sorted-union canonicalization agree
+everywhere multi-grant and paramsSubset were exercised (2,068
+allow_unresolved results). a15 contributes only decoded-path lone-surrogate
+cases (same class as F1) and the F9 BOM cases come from the a13 template set.
 
-a03 (malformed Unicode) is the only axis carrying a real cross_impl finding:
-F1, the Go decoded-path repair. The `raw_b64` cases on the same axis (F2) are a
-harness representability artifact and carry no finding. a04 carries a cross_path
-split only, and F7 shows why an axis-by-axis corpus is not enough to see the
-whole boundary: the raw size defect lived where a04 and a08 meet.
+a02, a04 and a08 show cross-path only, and a02/a04 are designed (F5, F6). a08
+is now free of every class after F3.
+
+a03 (malformed Unicode) and a15 (i18n edges) are the only axes carrying a real
+cross_impl finding: F1, the Go decoded-path repair. The `raw_b64` cases on a03
+were formerly F2 (a harness representability artifact); since the TS runner
+gained surrogateescape decoding they no longer diverge. a13 carries F8 (falsy
+scalars) and F9 (BOM) - the two new findings.
 
 ## Canonical SHA-256 (value layer)
 
-Zero cross_impl digest mismatches outside the F2 raw-byte cases. For every
-successfully decoded object value the three implementations produce identical
-JCS canonical bytes. This covers the CLC-1.7 key-order fix and numeric
-representation.
+Zero cross_impl digest mismatches in R2, including the new turn-round catalog
+(a09) and the a11/a14 layers. For every successfully decoded object value the
+three implementations produce identical JCS canonical bytes. This covers the
+CLC-1.7 key-order fix, numeric representation, and the number-shape corpus
+a14 now exercises specifically.
 
 ## Reproduce
 
 ```bash
 cd aic-capability-demo
-python3 fuzz/gen_cases.py --n 100000 --seed 20260915 > /tmp/cases.jsonl
+python3 fuzz/gen_cases.py --n 100000 --seed 20260915 > /tmp/cases.jsonl   # 15 axes
 python3 fuzz/run_py.py /tmp/cases.jsonl > /tmp/res_py.jsonl
 npx --yes tsx fuzz/run_ts.ts /tmp/cases.jsonl > /tmp/res_ts.jsonl
 (cd ../register && go run ./semantics/fuzz_runner /tmp/cases.jsonl > /tmp/res_go.jsonl)
@@ -474,23 +610,26 @@ python3 fuzz/compare.py /tmp/cases.jsonl /tmp/res_py.jsonl /tmp/res_ts.jsonl /tm
   > fuzz-findings.json
 ```
 
-Rerun step 2 and `diff` the result files to confirm determinism.
+Rerun step 2 and `diff` the result files to confirm determinism (verified for
+py, ts and go on the R2 file).
 
 ## Scope
 
-- Done: 100,000-case and 2,000-case boundary runs, before and after `2d3aa9a`;
-  per-case findings in `fuzz-findings.json`, summary in
-  `fuzz/findings-summary.json`.
+- Done: 100,000-case and 2,000-case boundary runs across R1 (10 axes) and R2
+  (15 axes, three new axis families plus i18n); per-case findings in
+  `fuzz-findings.json`, summary in `fuzz/findings-summary.json`.
 - Repeatable: fixed seed, deterministic generator, byte-identical reruns.
 - F1 is closed as a documented boundary (CLC-1.8 §6.2 item 7, §11) rather
   than by a code change, because the information a decoded path would need is
-  gone. F2 is a
-  harness and API question rather than a CLC finding - the TypeScript binding
-  would need a byte-oriented raw entry point before `raw_b64` can be tested
-  against it at all. Neither is folded into the designed class.
+  gone. F2 is a harness question that the R2 TS runner fix closed: with
+  surrogateescape the `raw_b64` corpus no longer diverges on any class. F3,
+  F4 and F7 were fixed by code changes. F8 (falsy scalar params) and F9
+  (BOM stripping) are open TypeScript-side findings from R2, currently
+  documented, not fixed.
 - Not covered: the axes are varied one at a time, so no axis generates the
-  intersection of two boundary dimensions (F7) and the corpus holds no
-  multi-grant, delegation, evidence or crosswalk case. "All three implementations
+  intersection of two boundary dimensions (F7); the corpus holds no
+  delegation, evidence or crosswalk case (multi-grant aggregation, paramsSubset
+  and allow_unresolved are now covered by a11/a12). "All three implementations
   agree" in this report means the parameter boundary only.
 - The corpus and result dumps are generated artifacts and are not committed.
   Only the harness, this report and the summary are.

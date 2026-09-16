@@ -1,8 +1,13 @@
 # CLC-v1 Parity Report
 
-Date: 2026-09-12 (rev 12: CLC-1.3 closeout — 105 vectors; `allow_unresolved` independent verdict, (scheme,type) constraint identity, same-day time-window grammar, `{}`≡absent params, §9.3 multi-grant aggregation; Go/Python/TS parity)
+Date: 2026-09-12 (rev 12: CLC-1.3 closeout — 105 vectors; `allow_unresolved` independent verdict, (scheme,type) constraint identity, same-day time-window grammar, `{}`≡absent params, §9.3 multi-grant aggregation; Go/Python/TS parity).  Latest: rev 14 (2026-09-16, CLC-1.8 closeout — corpus 114 → 120, see below).
 
 ## Summary
+
+> **Snapshot note**: this Summary and the Per-Kind Breakdown below are the
+> historical rev-12 tables; they do not reflect later corpus growth.  The
+> current state is rev 14 (120 vectors, 1184 property cases) — see the rev 14
+> section below.
 
 | Metric | Value |
 |--------|-------|
@@ -66,6 +71,25 @@ report (internal `unknown` → `UNSATISFIED`/`evidence_not_core_evaluated`).
 
 Reproduce: `python3 jcs_check.py`, `node --experimental-strip-types ts/jcs_check.ts`,
 and `(cd ../register && go test ./semantics/ -run TestCanonical)`.
+
+## rev 14 Changes (2026-09-16) — CLC-1.8 closeout, corpus 114 → 120
+
+The corpus grew from 114 to 120 vectors with six pins added during the
+2026-09-16 audit round:
+
+- `entail-007/-008` — a `*` at class position is not a trailing action wildcard:
+  `std/database-v1:*` vs `std/database-v1:query:SELECT` and `...:admin:DDL`, both
+  `different_namespace` (§5.1/§9.3 layer 3).
+- `decide-035` — multi-grant residual-obligation union: two covering grants
+  carrying `network:cidr` and `time:window` resolve to `allow_unresolved` with
+  both constraints in `unresolved` (§9.1/§8.4).
+- `nested-001/-002/-003` — key closure, presence and bound checks recurse into
+  nested objects: `undeclared_param` (`cfg.b` undeclared), `params_missing`
+  (`cfg.a` omitted) and `params_exceed_grant` (`cfg.limit` 15 > 10).
+
+Kind counts are now syntax 9 / entail 47 / intersect 14 / decide 50 (120 total);
+`property-cases.json` stays at 1184.  The Go conformance runner reports
+`Total: 120 | Pass: 120 | Fail: 0`, and the Python/TS runners agree.
 
 ## Per-Kind Breakdown
 
@@ -572,7 +596,7 @@ exists — `ts/` in this repository (`clc_semantics.ts` + `vectors-run.ts` +
 `property.ts`, Node-only, zero npm deps) — and it is part of the conformance bar:
 all three run `vectors.json` and `property-cases.json` from `varwof/capability`.
 
-Current state (2026-09-11): **105 vectors** (was 60 when this report was
+State at 2026-09-11: **105 vectors** (was 60 when this report was
 written; `params-022..024`, `decide-016..018`, `intersect-007..010` and the
 boundary positives were added since) and **524 property cases**, with all three
 implementations agreeing on both corpora.
@@ -596,7 +620,9 @@ corpus holds single-fault inputs only, so no runner currently catches it.
 > **Update (2026-09-12, rev 12)**: the multi-fault gap was closed that same
 > evening — `params-025/-026/-027` pin the §6.2 item 5 order and `ts`
 > `validateRawParams` is now a two-pass scan (size/depth before dup/number).
-> Current corpus is 105 vectors and 1184 property cases (see rev 12 above).
+> At that time the corpus was 105 vectors and 1184 property cases (see rev 12
+> above); it has since grown to 114 (CLC-1.7/1.8) and then 120 vectors with
+> 1184 property cases (see rev 14 above).
 
 See also `varwof/capability` → `docs/design-notes.md` for the English decision record
 (why each rule was chosen, what was rejected, and the probe batch that found three

@@ -59,14 +59,14 @@ def eval_case(case):
     if raw_b64 is not None:
         raw = base64.b64decode(raw_b64).decode("utf-8", errors="surrogateescape")
     op_id = case["op_id"]
-    grant = case.get("grant")
 
     out = {"id": cid, "impl": "py"}
+    grants = _grants(case)
 
     # ---- raw text path --------------------------------------------------------
     if no_params:
         op = {"id": op_id}
-        out["raw_path"] = _authorize(grant, op)
+        out["raw_path"] = _authorize(grants, op)
     else:
         code = raw_validation_code(raw)
         if code:
@@ -79,7 +79,7 @@ def eval_case(case):
             if params is None:
                 out["raw_path"] = {"verdict": "deny", "reason": "invalid_params_number"}
             else:
-                out["raw_path"] = _authorize(grant, {"id": op_id, "params": params})
+                out["raw_path"] = _authorize(grants, {"id": op_id, "params": params})
 
     # ---- decoded object path --------------------------------------------------
     decoded_params = None
@@ -88,11 +88,11 @@ def eval_case(case):
     except Exception:
         decoded_params = "##decode-failed##"
     if no_params:
-        out["decoded_path"] = _authorize(grant, {"id": op_id})
+        out["decoded_path"] = _authorize(grants, {"id": op_id})
     elif decoded_params == "##decode-failed##":
         out["decoded_path"] = {"verdict": "deny", "reason": "invalid_params_number"}
     else:
-        out["decoded_path"] = _authorize(grant, {"id": op_id, "params": decoded_params})
+        out["decoded_path"] = _authorize(grants, {"id": op_id, "params": decoded_params})
 
     # ---- value-layer canonical digest ------------------------------------------
     try:
@@ -109,13 +109,25 @@ def eval_case(case):
     return out
 
 
-def _authorize(grant, op):
+def _grants(case):
+    """The effective grant list: multi-grant cases carry `grants`, else the
+    single `grant` (may be None / {} / absent)."""
+    g = case.get("grants")
+    if g is not None:
+        return g
+    return [case.get("grant")]
+
+
+def _authorize(grants, op):
     try:
-        res = authorize_set([grant], op)
-        return {
+        res = authorize_set(grants, op)
+        pr = {
             "verdict": res["verdict"],
             "reason": canonical_reason(res.get("reason", "")),
         }
+        if res.get("unresolved"):
+            pr["unresolved"] = res["unresolved"]
+        return pr
     except CLCError as e:
         return {"verdict": "deny", "reason": canonical_reason(str(e))}
     # Any other exception is a semantics crash (e.g. AttributeError on

@@ -1,116 +1,16 @@
 {
-  "seed": 20260915,
-  "generator": "fuzz/gen_cases.py",
-  "corpus": {
-    "main": 100000,
-    "boundary": 2000,
-    "axes": "a01-a10, 10000 cases each"
-  },
-  "pins": {
-    "before": {
-      "aic-capability-demo": "75bc79e",
-      "register": "unchanged"
-    },
-    "after": {
-      "aic-capability-demo": "2d3aa9a",
-      "register": "unchanged"
-    },
-    "current": {
-      "aic-capability-demo": "raw-boundary fix (CLC-1.8)",
-      "register": "raw-boundary fix (CLC-1.8)"
-    }
-  },
-  "classes": {
-    "cross_impl": "same input, same path, verdict or reason differs across impls",
-    "cross_path": "raw boundary vs decoded boundary inside one impl (CLC 6.2, designed, not a divergence)",
-    "unstable": "an impl crashed or produced no decision where others decided"
-  },
-  "before": {
-    "cross_impl_by_path": {
-      "decoded_path": 2499
-    },
-    "cross_impl_reason": [
-      {
-        "divergent_reasons": [
-          "",
-          "invalid_params_number"
-        ],
-        "count": 1791
-      },
-      {
-        "divergent_reasons": [
-          "invalid_params_number",
-          "invalid_params_size"
-        ],
-        "count": 708
-      }
-    ],
-    "cross_path_unique_ids": 13069,
-    "cross_path_impl_rows": 34917,
-    "unstable_count": 1350
-  },
-  "after": {
-    "cross_impl_by_path": {
-      "decoded_path": 2047,
-      "raw_path": 256,
-      "canonical_sha256": 164
-    },
-    "cross_impl_reason": [
-      {
-        "divergent_reasons": [
-          "",
-          "invalid_params_number"
-        ],
-        "count": 2303
-      }
-    ],
-    "cross_path_unique_ids": 12617,
-    "cross_path_impl_rows": 33849,
-    "unstable_count": 0,
-    "cross_impl_split": {
-      "decoded_path_a03_lone_surrogate": 1791,
-      "decoded_path_a03_raw_b64": 256,
-      "raw_path_a03_raw_b64": 256,
-      "value_digest_a03_raw_b64": 164,
-      "note": "raw_b64 cases are a harness representability artifact: each runner feeds the same octets to a different string type (Go bytes, Python surrogateescape, TS ascii). Only the 1791 lone-surrogate cases are a real implementation difference; that is F1."
-    }
-  },
-  "boundary_after": {
-    "N": 2000,
-    "cross_impl_by_path": {
-      "decoded_path": 6
-    },
-    "unstable_count": 0
-  },
-  "determinism": "byte-identical reruns, diff exit 0 (py, ts, go)",
-  "current": {
-    "corpus_vectors": 114,
-    "cross_impl_by_path": {
-      "decoded_path": 2047,
-      "raw_path": 164,
-      "canonical_sha256": 164
-    },
-    "cross_impl_split": {
-      "decoded_path_a03_lone_surrogate": 1791,
-      "decoded_path_a03_raw_b64": 256,
-      "raw_path_a03_raw_b64": 164,
-      "value_digest_a03_raw_b64": 164,
-      "note": "only the 1791 lone-surrogate cases are a real implementation difference (F1); every raw_b64 case is the F2 harness representability set"
-    },
-    "cross_path_unique_ids": 12617,
-    "cross_path_impl_rows": 33757,
-    "cross_path_by_impl": {
-      "go": 12617,
-      "py": 10570,
-      "ts": 10570
-    },
-    "unstable_count": 0,
-    "fixed_since_previous": {
-      "raw_size_counts_received_number_spelling": "F7, pinned by params-033..038",
-      "typescript_literal_astral_counted_by_utf16_code_unit": "F7",
-      "typescript_accepted_literal_control_character": "F7",
-      "pinned_by": "params-033..039"
-    },
-    "f1_status": "closed as a documented boundary in CLC-1.8: 6.2 item 7 requires the boundary checks on the received text before any decoding and forbids describing a decoded-value-only entry point as refusing malformed Unicode; 11 states that a 6.2 refusal does not transfer to a decoded value.  The information itself stays unrecoverable after a lossy decode."
-  }
+ "seed": 20260915,
+ "case_count": 99990,
+ "boundary_count": 2000,
+ "axes": 15,
+ "cross_impl_by_path": {
+  "decoded_path": 3303,
+  "raw_path": 207
+ },
+ "cross_path_by_impl": {
+  "py": 8150,
+  "ts": 8619,
+  "go": 11191
+ },
+ "unstable": 0
 }

@@ -147,7 +147,7 @@ A = {}
 
 
 def case(axis, raw, grant, op_id, note, no_params=False, raw_text=None,
-        raw_bytes=None):
+        raw_bytes=None, grants=None):
     c = {
         "axis": axis,
         "raw": raw if raw_text is None else raw_text,
@@ -155,6 +155,8 @@ def case(axis, raw, grant, op_id, note, no_params=False, raw_text=None,
         "grant": grant,
         "note": wrap_note(axis, note),
     }
+    if grants is not None:
+        c["grants"] = grants
     if no_params:
         c["no_params"] = True
     if raw_bytes is not None:
@@ -315,15 +317,28 @@ def make_numbers(rng, n):
         "-2.2250738585072014e-308", "0.1", "0.2", "0.1e-3",
         "123", "12.34", "-12.34", "0.00000000000000001", "1e-999999",
     ]
+    # Integers with more than 308 digits lie beyond double precision.  Both
+    # languages must canonicalize them to the SAME reason (deny
+    # invalid_params_number), not crash (Python OverflowError) or allow —
+    # audit 2026-09-16: R4 canonical_json guard.
+    huge = [
+        "9" * 309,
+        "9" * 400,
+        ("9" * 309) + "1",
+        "-" + "1" + ("0" * 308),
+        "1" + ("0" * 400),
+        "123456789" * 46,  # 9+414 digits
+    ]
     i = 0
     out = []
+    literals = numeric + huge
     while len(out) < n:
-        if i < len(numeric):
-            lit = numeric[i]
+        if i < len(literals):
+            lit = literals[i]
             i += 1
             note = "literal %s" % lit
         else:
-            lit = rng.choice(numeric)
+            lit = rng.choice(literals)
             note = "random literal reuse"
         as_key = rng.random() < 0.05
         if as_key:
@@ -561,6 +576,239 @@ def make_ids(rng, n):
 
 
 # ----------------------------------------------------------------------------
+# axis a11 multi-grant aggregation (§9.3)
+# ----------------------------------------------------------------------------
+def make_multigrant(rng, n):
+    """Random 1-4 grant sets.  Covers: union-allow (any granting grant),
+    allow_unresolved with sorted+deduped unresolved across grants, order-
+    independent unresolvable union, denyReasonFirst (first covering grant's
+    params/constraint-layer reason in input order), absent grants."""
+    op_ids = OP_IDS[:] + BAD_IDS[1:]
+    constraints = KNOWN_CONSTRAINTS + UNKNOWN_CONSTRAINTS
+    param_grants = [
+        {"limit": 10}, {"max_rows": 100}, {"s": "x"}, {"limit": 10, "s": "x"},
+        {"flags": ["r", "w"]}, {"nested": {"a": 1}},
+    ]
+    out = []
+    for _ in range(n):
+        op_id = rng.choice(op_ids)
+        grant_ids = [rng.choice(OP_IDS + BAD_IDS) for _ in range(rng.randint(1, 4))]
+        # at least sometimes include the matching op id so union logic fires
+        if rng.random() < 0.6 and op_id not in grant_ids:
+            grant_ids[rng.randrange(len(grant_ids))] = op_id
+        grants = []
+        for gid in grant_ids:
+            g = {"id": gid}
+            if rng.random() < 0.5:
+                g["params"] = rng.choice(param_grants)
+            if rng.random() < 0.6:
+                g["constraints"] = [rng.choice(constraints)]
+            grants.append(g)
+        raw = render({"q": 1})
+        note = "multi-grant set %d, cover=%s" % (len(grants), op_id)
+        out.append(case("a11", raw, grants[0], op_id, note, grants=grants))
+    return out
+
+
+# ----------------------------------------------------------------------------
+# axis a12 grant params subset (§5.2 §9.3)
+# ----------------------------------------------------------------------------
+def make_params_subset(rng, n):
+    """Grant.params vs op.params relations: exact equal, slack (op params a
+    superset), missing grant keys, undeclared op keys, empty/absent grant
+    params, numeric bound, enum array, null grant param, nested dict."""
+    op_id = "std/database-v1:query:SELECT"
+    templates = [
+        # (grant params, op params raw, note)
+        ({"limit": 10}, {"limit": 10}, "exact match"),
+        ({"limit": 10}, {}, "grant keys absent in op"),
+        ({"limit": 10}, {"limit": 10, "extra": 1}, "op undeclared key"),
+        ({}, {"limit": 10}, "empty grant params unconstrained"),
+        (None, {"limit": 10}, "absent grant params unconstrained"),
+        ({"limit": 10}, {"limit": 20}, "op exceeds numeric bound"),
+        ({"limit": 10}, {"limit": 5}, "op within bound"),
+        ({"mode": ["read", "write"]}, {"mode": "read"}, "enum scalar hit"),
+        ({"mode": ["read", "write"]}, {"mode": "delete"}, "enum scalar miss"),
+        ({"mode": ["read", "write"]}, {"mode": ["read", "write"]}, "enum array"),
+        ({"mode": ["read", "write"]}, {"mode": ["read"]}, "enum array subset"),
+        ({"mode": []}, {"mode": "read"}, "empty enum denies class"),
+        ({"x": None}, {"x": None}, "null grant param"),
+        ({"nested": {"a": 1}}, {"nested": {"a": 1}}, "nested dict equal"),
+        ({"nested": {"a": 1}}, {"nested": {"a": 1, "b": 2}}, "nested op superset"),
+        ({"nested": {"a": 1}}, {"nested": {}}, "nested grant keys absent"),
+        ({"limit": 10}, {}, "empty op params with bound grant"),
+    ]
+    # R6 (audit 2026-09-16): a FALSY SCALAR op param (0, "", false) must be
+    # denied as invalid_params_number even against an apparently-unbounded
+    # grant — a falsy scalar must never be read as "no params".  (None/{}
+    # for the same grants are allow.)
+    r6_scalar_templates = [
+        ({"limit": 10}, {"limit": 0}, "bounded grant, falsy-scalar param 0"),
+        ({"mode": ["read", "write"]}, {"mode": ""}, "bounded grant, falsy-scalar param ''"),
+        ({"mode": ["read", "write"]}, {"mode": False}, "bounded grant, falsy-scalar param false"),
+        ({"s": "x"}, {"s": 0}, "plain grant, falsy-scalar param 0"),
+        ({}, {"limit": 0}, "empty grant, falsy-scalar param 0"),
+        (None, {"limit": 0}, "absent grant, falsy-scalar param 0"),
+        ({}, {"limit": ""}, "empty grant, falsy-scalar param ''"),
+        (None, {"limit": False}, "absent grant, falsy-scalar param false"),
+    ]
+    out = []
+    i = 0
+    all_templates = templates + r6_scalar_templates
+    while len(out) < n:
+        if i < len(all_templates):
+            gp, op, note = all_templates[i]
+            i += 1
+        else:
+            gp = rng.choice(param_shapes())
+            op = rng.choice(param_shapes())
+            note = "random grant/op params"
+        op_raw = render(op)
+        grant = {"id": op_id, "params": gp}
+        out.append(case("a12", op_raw, grant, op_id, note))
+    return out
+
+
+def param_shapes():
+    return [
+        {"limit": 10}, {"limit": 20}, {}, {"s": "x"}, {"mode": ["read"]},
+        {"mode": []}, {"nested": {"a": 1}}, {"a": 1, "b": 2}, None,
+    ]
+
+
+# ----------------------------------------------------------------------------
+# axis a13 malformed / over-boundary inputs (robustness)
+# ----------------------------------------------------------------------------
+def make_robust(rng, n):
+    """Inputs that are not well-formed JSON objects or blow past the §6.2
+    caps: bare scalars, arrays, truncated, whitespace, huge numbers, deep
+    nesting beyond any recursion/structure limits, huge strings, NUL bytes,
+    bare control chars, raw invalid UTF-8 bytes."""
+    op_id = "std/database-v1:query:SELECT"
+    templates = [
+        ("1", "bare int"),
+        ('"x"', "bare string"),
+        ("null", "bare null"),
+        ("true", "bare bool"),
+        ("[]", "empty array"),
+        ("[1]", "scalar array"),
+        ("{}", "empty object"),
+        ("   ", "whitespace only"),
+        ("", "empty string"),
+        ("{", "truncated obj open"),
+        ("}", "stray close"),
+        ("{\"a\":", "truncated internal"),
+        ("1e400", "overflow number"),
+        ("-0", "negative zero"),
+        ("1", "dup scalar via array"),  # covered above; filler below
+    ]
+    out = []
+    i = 0
+    while len(out) < n:
+        if i < len(templates):
+            raw, note = templates[i]
+            i += 1
+        else:
+            kind = rng.randrange(6)
+            if kind == 0:
+                raw = str(rng.choice([-1, 0, 1, 9007199254740993]))
+                note = "bare int %s" % raw
+            elif kind == 1:
+                raw = '{"s":"%s"}' % ("x" * rng.choice([0, 1, 512, 65536]))
+                note = "long string value"
+            elif kind == 2:
+                # recursion/deep-nesting hammer
+                d = rng.choice([64, 256, 1024, 4096, 20000])
+                raw = "[" * d + "0" + "]" * d
+                note = "deep array %d" % d
+            elif kind == 3:
+                raw = '{"\u0000":1}'
+                note = "NUL in key (raw text)"
+            elif kind == 4:
+                raw = '{"s":"a\\u0000b\\u001fc"}'
+                note = "control chars in string"
+            else:
+                blob = rng.choice([b'\xff\xfe{}', b'{"\x80":1}', b'{"s":1}\x00',
+                                   b'\xed\xa0\x80', b'\xef\xbb\xbf{"s":1}'])
+                out.append(case("a13", "", attrs(op_id), op_id,
+                                "invalid bytes (raw_b64) %r" % blob[:8],
+                                raw_bytes=blob))
+                continue
+        out.append(case("a13", raw, attrs(op_id), op_id, note))
+    return out
+
+
+# ----------------------------------------------------------------------------
+# axis a14 JCS round-trip numbers (value layer)
+# ----------------------------------------------------------------------------
+def make_jcs_numbers(rng, n):
+    """Numbers whose JCS / Number::toString round-trip could diverge:
+    2^53, 1e21, -0, 1e400, subnormal 5e-324, irrational-ish decimals."""
+    op_id = "std/database-v1:query:SELECT"
+    lits = [
+        "9007199254740992", "9007199254740993", "1e21", "1e22",
+        "100000000000000000000", "0.30000000000000004", "0.1", "5e-324",
+        "2.2250738585072014e-308", "-0", "1e400", "1e-400", "1.7976931348623157e308",
+        "-1.7976931348623157e308", "123456789012345678901234567890",
+        "0.0000001", "1e-7", "1.5e15", "9999999999999999",
+    ]
+    out = []
+    i = 0
+    while len(out) < n:
+        if i < len(lits):
+            lit, note = lits[i], lits[i]
+            i += 1
+        else:
+            lit = rng.choice(lits)
+            note = "random number literal"
+        raw = '{"n":%s}' % lit
+        out.append(case("a14", raw, attrs(op_id), op_id, "number %s" % note))
+    return out
+
+
+# ----------------------------------------------------------------------------
+# axis a15 i18n / unicode edge cases
+# ----------------------------------------------------------------------------
+def make_i18n(rng, n):
+    """CJK keys/values, BMP boundary (U+FFFF, U+10000 astral plane),
+    combining marks, RTL, zero-width, BOM, raw overlong UTF-8 encodings."""
+    op_id = "std/database-v1:query:SELECT"
+    strs = [
+        "\u4e2d\u6587", "\u0021\u0030", "\uffff", "\U00010000", "\U0001F600",
+        "e\u0301", "\u05ea\u05e9\u05e8\u05d9", "\u200b", "\ufeff",
+        "\u00e9\u00e8\u00ea", "\u4e00\ud800", "\u00c5\u00c5\u00c5",
+        "\U0010FFFF", "\u007f", "\u0000",
+    ]
+    out = []
+    i = 0
+    while len(out) < n:
+        if i < len(strs):
+            s = strs[i]
+            note = "char U+%04X" % ord(s[0])
+            i += 1
+        else:
+            s = rng.choice(strs)
+            note = "random unicode string"
+        raw = '{"k\u00e9y":%s,"\u4e2d":%s}' % (
+            render(s), render(rng.choice(strs)))
+        # occasionally raw overlong / invalid UTF-8 encodings
+        if rng.random() < 0.12:
+            blob = rng.choice([
+                b'{"k":"\xc0\xaf"}',       # overlong '/'
+                b'{"k":"\xe0\x80\xaf"}',
+                b'{"k":"\xf4\x90\x80\x80"}',  # > U+10FFFF
+                b'{"\xff":"x"}',
+                '{"k":"\uffff"}'.encode(),   # valid U+FFFF (not in JSONL? fine)
+            ])
+            out.append(case("a15", "", attrs(op_id), op_id,
+                            "invalid utf8 (raw_b64) %r" % blob[:6],
+                            raw_bytes=blob))
+            continue
+        out.append(case("a15", raw, attrs(op_id), op_id, note))
+    return out
+
+
+# ----------------------------------------------------------------------------
 # boundary-only set (CI candidate, ~2000 cases)
 # ----------------------------------------------------------------------------
 def make_boundary(rng):
@@ -622,14 +870,17 @@ def main():
     if args.boundary:
         all_cases.extend(make_boundary(rng))
     else:
-        each = args.n // 10
+        axes = 15
+        each = args.n // axes
         builders = [
             (make_key_order, "a01"), (make_dup_keys, "a02"),
             (make_unicode, "a03"), (make_numbers, "a04"),
             (make_missing, "a05"), (make_types, "a06"),
             (make_arrays, "a07"), (make_sizes, "a08"),
             (make_depths, "a08"), (make_constraints, "a09"),
-            (make_ids, "a10"),
+            (make_ids, "a10"), (make_multigrant, "a11"),
+            (make_params_subset, "a12"), (make_robust, "a13"),
+            (make_jcs_numbers, "a14"), (make_i18n, "a15"),
         ]
         # merge the two a08 sub-generators
         sizes = make_sizes(rng, each // 2 or 1)
@@ -638,7 +889,7 @@ def main():
             (sizes, "a08"),
             (depths, "a08"),
         ]
-        order = list(range(10))
+        order = list(range(15))
         for idx, (fn, ax) in enumerate(builders):
             if ax == "a08":
                 continue
