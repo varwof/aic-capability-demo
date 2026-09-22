@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto';
 export interface Grant {
     id: string;
     params?: Record<string, unknown> | null;
+    param_bounds?: Record<string, unknown> | null;
     constraints?: string[];
 }
 export interface Operation {
@@ -81,7 +82,7 @@ export const RECOGNIZED_CONSTRAINT_IDENTITIES = new Set(
 // shortcuts escape as two, every other control as `\u00xx` (six), and
 // `&`/`<`/`>`/U+2028/U+2029/non-ASCII stay raw — and includes both string
 // quotes, so the raw and decoded limits agree; CLC-1.4/1.5 inputs still read.)
-export const CLC_REVISION = 'CLC-1.8';
+export const CLC_REVISION = 'CLC-1.14';
 // §6.2 step 4: bounds on the JCS-serialized params form.
 export const MAX_PARAMS_SERIALIZED_BYTES = 512;
 export const MAX_PARAMS_NESTING = 32;
@@ -872,6 +873,598 @@ export function valueSubset(
     return jsonEqual(opVal, grantVal) ? [true, ''] : [false, 'params_exceed_grant'];
 }
 
+// ---- rev CLC-1.10 §6.5 extended parameter bounds -------------------------
+
+function isNumber(v: unknown): v is number {
+    return typeof v === 'number' && Number.isFinite(v);
+}
+
+function boundOptional(b: unknown): boolean {
+    return isPlainObject(b) && b['optional'] === true;
+}
+
+function validateBound(b: unknown): string {
+    if (!isPlainObject(b)) {
+        return 'invalid_params_binding: bound is not an object';
+    }
+    let hasNumeric = false;
+    let hasEnum = false;
+    let hasNested = false;
+    for (const k of Object.keys(b)) {
+        if (k === 'min' || k === 'max' || k === 'step') {
+            hasNumeric = true;
+        } else if (k === 'enum' || k === 'min_items' || k === 'max_items') {
+            hasEnum = true;
+        } else if (k === 'nested') {
+            hasNested = true;
+        } else if (k === 'optional') {
+            if (typeof b[k] !== 'boolean') {
+                return 'invalid_params_binding: optional is not a boolean';
+            }
+        } else {
+            return `invalid_params_binding: unknown Bound member ${k}`;
+        }
+    }
+    if ((hasNumeric ? 1 : 0) + (hasEnum ? 1 : 0) + (hasNested ? 1 : 0) > 1) {
+        return 'invalid_params_binding: mixed bound families';
+    }
+    for (const k of ['min', 'max', 'step']) {
+        if (k in b && !isNumber(b[k])) {
+            return `invalid_params_binding: ${k} is not a number`;
+        }
+    }
+    if (isNumber(b['step']) && b['step'] <= 0) {
+        return 'invalid_params_binding: step must be positive';
+    }
+    if (isNumber(b['min']) && isNumber(b['max']) && b['min'] > b['max']) {
+        return 'invalid_params_binding: min > max';
+    }
+    if ('enum' in b && !Array.isArray(b['enum'])) {
+        return 'invalid_params_binding: enum is not an array';
+    }
+    for (const k of ['min_items', 'max_items']) {
+        if (k in b) {
+            const n = b[k];
+            if (!isNumber(n) || n < 0 || !Number.isInteger(n)) {
+                return `invalid_params_binding: ${k} is not a non-negative integer`;
+            }
+        }
+    }
+    if (isNumber(b['min_items']) && isNumber(b['max_items']) && b['min_items'] > b['max_items']) {
+        return 'invalid_params_binding: min_items > max_items';
+    }
+    if ('nested' in b) {
+        if (!isPlainObject(b['nested'])) {
+            return 'invalid_params_binding: nested is not an object';
+        }
+        for (const nb of Object.values(b['nested'])) {
+            const r = validateBound(nb);
+            if (r) {
+                return r;
+            }
+        }
+    }
+    return '';
+}
+
+export function validateParamBounds(
+    bounds?: Record<string, unknown> | null,
+    params?: Record<string, unknown> | null,
+): string {
+    if (bounds == null) {
+        return '';
+    }
+    try {
+        validateParams(bounds);
+    } catch (e) {
+        return (e as SemanticsError).message;
+    }
+    for (const [k, b] of Object.entries(bounds)) {
+        if (k === '') {
+            return 'invalid_params_binding: empty key';
+        }
+        if (params != null && k in params) {
+            return `invalid_params_binding: ${k} in both params and param_bounds`;
+        }
+        const r = validateBound(b);
+        if (r) {
+            return r;
+        }
+    }
+    return '';
+}
+
+function isMultipleOf(v: number, step: number): boolean {
+    if (step === 0) {
+        return false;
+    }
+    const q = v / step;
+    return q === Math.trunc(q) && q * step === v;
+}
+
+function nestedSubset(op: Record<string, unknown>, nested: Record<string, unknown>): [boolean, string] {
+    for (const [k, b] of Object.entries(nested)) {
+        if (!(k in op)) {
+            if (boundOptional(b)) {
+                continue;
+            }
+            return [false, 'params_missing'];
+        }
+        const [ok, reason] = boundSubset(op[k], b);
+        if (!ok) {
+            return [false, reason];
+        }
+    }
+    for (const k of Object.keys(op)) {
+        if (!(k in nested)) {
+            return [false, `undeclared_param: ${k}`];
+        }
+    }
+    return [true, ''];
+}
+
+function boundSubset(opVal: unknown, bound: unknown): [boolean, string] {
+    if (!isPlainObject(bound)) {
+        return [false, 'invalid_params_binding'];
+    }
+    if ('enum' in bound) {
+        const gv = bound['enum'];
+        if (!Array.isArray(gv)) {
+            return [false, 'invalid_params_binding'];
+        }
+        if (gv.length === 0) {
+            return [false, 'empty_bound_denies_class'];
+        }
+        const elems = Array.isArray(opVal) ? opVal : [opVal];
+        for (const o of elems) {
+            if (!gv.some((g) => jsonEqual(o, g))) {
+                return [false, 'not_in_enum'];
+            }
+        }
+    }
+    if ('min_items' in bound || 'max_items' in bound) {
+        const card = Array.isArray(opVal) ? opVal.length : 1;
+        if (isNumber(bound['min_items']) && card < bound['min_items']) {
+            return [false, 'params_cardinality'];
+        }
+        if (isNumber(bound['max_items']) && card > bound['max_items']) {
+            return [false, 'params_cardinality'];
+        }
+    }
+    if ('nested' in bound) {
+        if (!isPlainObject(opVal) || !isPlainObject(bound['nested'])) {
+            return [false, 'params_exceed_grant'];
+        }
+        return nestedSubset(opVal, bound['nested']);
+    }
+    if ('min' in bound || 'max' in bound || 'step' in bound) {
+        if (!isNumber(opVal)) {
+            return [false, 'params_exceed_grant'];
+        }
+        if (isNumber(bound['min']) && opVal < bound['min']) {
+            return [false, 'params_out_of_range'];
+        }
+        if (isNumber(bound['max']) && opVal > bound['max']) {
+            return [false, 'params_out_of_range'];
+        }
+        if (isNumber(bound['step']) && !isMultipleOf(opVal, bound['step'])) {
+            return [false, 'params_not_multiple'];
+        }
+    }
+    return [true, ''];
+}
+
+// ---- rev CLC-1.14 §6.6 BoundMeet -----------------------------------------
+
+function canonicalEnumMembers(members: unknown[]): unknown[] {
+    const seen = new Map<string, unknown>();
+    for (const m of members) {
+        let k: string;
+        try {
+            k = canonicalJSON(m);
+        } catch {
+            k = String(m);
+        }
+        if (!seen.has(k)) {
+            seen.set(k, m);
+        }
+    }
+    return [...seen.keys()].sort().map((k) => seen.get(k));
+}
+
+function boundFamily(b: unknown): string {
+    if (!isPlainObject(b)) {
+        return 'invalid';
+    }
+    if ('nested' in b) {
+        return 'nested';
+    }
+    if ('enum' in b || 'min_items' in b || 'max_items' in b) {
+        return 'enum';
+    }
+    if ('min' in b || 'max' in b || 'step' in b) {
+        return 'numeric';
+    }
+    return 'none';
+}
+
+function boundDeniesClass(b: unknown): boolean {
+    if (!isPlainObject(b)) {
+        return false;
+    }
+    const e = b['enum'];
+    if (Array.isArray(e) && e.length === 0) {
+        return true;
+    }
+    const nm = b['nested'];
+    if (isPlainObject(nm)) {
+        return Object.values(nm).some((x) => boundDeniesClass(x));
+    }
+    return false;
+}
+
+function boundsDenyClass(bounds: unknown): boolean {
+    return isPlainObject(bounds) && Object.values(bounds).some((b) => boundDeniesClass(b));
+}
+
+function copyBound(src: Record<string, unknown>, optional: boolean): Record<string, unknown> {
+    const res: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(src)) {
+        if (k !== 'optional') {
+            res[k] = v;
+        }
+    }
+    if (optional) {
+        res['optional'] = true;
+    }
+    return res;
+}
+
+function numericMeet(a: Record<string, unknown>, b: Record<string, unknown>): [Record<string, unknown>, string] {
+    const res: Record<string, unknown> = {};
+    const amin = a['min'];
+    const bmin = b['min'];
+    if (isNumber(amin) && isNumber(bmin)) {
+        res['min'] = amin > bmin ? amin : bmin;
+    } else if (isNumber(amin)) {
+        res['min'] = amin;
+    } else if (isNumber(bmin)) {
+        res['min'] = bmin;
+    }
+    const amax = a['max'];
+    const bmax = b['max'];
+    if (isNumber(amax) && isNumber(bmax)) {
+        res['max'] = amax < bmax ? amax : bmax;
+    } else if (isNumber(amax)) {
+        res['max'] = amax;
+    } else if (isNumber(bmax)) {
+        res['max'] = bmax;
+    }
+    const as = a['step'];
+    const bs = b['step'];
+    if (isNumber(as) && isNumber(bs)) {
+        if (isMultipleOf(as, bs)) {
+            res['step'] = as;
+        } else if (isMultipleOf(bs, as)) {
+            res['step'] = bs;
+        } else {
+            return [{}, 'invalid_params_binding'];
+        }
+    } else if (isNumber(as)) {
+        res['step'] = as;
+    } else if (isNumber(bs)) {
+        res['step'] = bs;
+    }
+    if (isNumber(res['min']) && isNumber(res['max']) && (res['min'] as number) > (res['max'] as number)) {
+        return [{}, 'no_overlap'];
+    }
+    return [res, ''];
+}
+
+function enumMeet(a: Record<string, unknown>, b: Record<string, unknown>): [Record<string, unknown>, string] {
+    const res: Record<string, unknown> = {};
+    const ae = a['enum'];
+    const be = b['enum'];
+    if (Array.isArray(ae) && Array.isArray(be)) {
+        const inter = ae.filter((x) => be.some((y) => jsonEqual(x, y)));
+        if (inter.length === 0) {
+            return [{}, 'no_overlap'];
+        }
+        res['enum'] = canonicalEnumMembers(inter);
+    } else if (Array.isArray(ae)) {
+        res['enum'] = [...ae];
+    } else if (Array.isArray(be)) {
+        res['enum'] = [...be];
+    }
+    const amin = a['min_items'];
+    const bmin = b['min_items'];
+    if (isNumber(amin) && isNumber(bmin)) {
+        res['min_items'] = amin > bmin ? amin : bmin;
+    } else if (isNumber(amin)) {
+        res['min_items'] = amin;
+    } else if (isNumber(bmin)) {
+        res['min_items'] = bmin;
+    }
+    const amax = a['max_items'];
+    const bmax = b['max_items'];
+    if (isNumber(amax) && isNumber(bmax)) {
+        res['max_items'] = amax < bmax ? amax : bmax;
+    } else if (isNumber(amax)) {
+        res['max_items'] = amax;
+    } else if (isNumber(bmax)) {
+        res['max_items'] = bmax;
+    }
+    if (isNumber(res['min_items']) && isNumber(res['max_items']) && (res['min_items'] as number) > (res['max_items'] as number)) {
+        return [{}, 'no_overlap'];
+    }
+    return [res, ''];
+}
+
+function numericEnumMeet(num: Record<string, unknown>, en: Record<string, unknown>): [Record<string, unknown>, string] {
+    const e = en['enum'];
+    if (!Array.isArray(e)) {
+        return [{}, 'invalid_params_binding'];
+    }
+    const filtered = e.filter((mem) => {
+        if (!isNumber(mem)) {
+            return false;
+        }
+        if (isNumber(num['min']) && mem < (num['min'] as number)) {
+            return false;
+        }
+        if (isNumber(num['max']) && mem > (num['max'] as number)) {
+            return false;
+        }
+        if (isNumber(num['step']) && !isMultipleOf(mem, num['step'] as number)) {
+            return false;
+        }
+        return true;
+    });
+    if (filtered.length === 0) {
+        return [{}, 'no_overlap'];
+    }
+    const res: Record<string, unknown> = { enum: canonicalEnumMembers(filtered) };
+    if ('min_items' in en) {
+        res['min_items'] = en['min_items'];
+    }
+    if ('max_items' in en) {
+        res['max_items'] = en['max_items'];
+    }
+    return [res, ''];
+}
+
+function nestedMeet(a: Record<string, unknown>, b: Record<string, unknown>): [Record<string, unknown>, string] {
+    const an = a['nested'];
+    const bn = b['nested'];
+    if (!isPlainObject(an) || !isPlainObject(bn) || Object.keys(an).length !== Object.keys(bn).length) {
+        return [{}, 'no_overlap'];
+    }
+    const res: Record<string, unknown> = {};
+    for (const [k, av] of Object.entries(an)) {
+        if (!(k in bn)) {
+            return [{}, 'no_overlap'];
+        }
+        const [m, err] = boundMeet(av, bn[k]);
+        if (err) {
+            return [{}, err];
+        }
+        res[k] = m;
+    }
+    return [{ nested: res }, ''];
+}
+
+function boundMeet(a: unknown, b: unknown): [Record<string, unknown>, string] {
+    if (!isPlainObject(a) || !isPlainObject(b)) {
+        return [{}, 'invalid_params_binding'];
+    }
+    const af = boundFamily(a);
+    const bf = boundFamily(b);
+    if (af === 'invalid' || bf === 'invalid') {
+        return [{}, 'invalid_params_binding'];
+    }
+    const opt = boundOptional(a) && boundOptional(b);
+    if (af === 'none' || bf === 'none') {
+        return [copyBound(af === 'none' ? b : a, opt), ''];
+    }
+    let res: Record<string, unknown>;
+    let err: string;
+    if (af === 'numeric' && bf === 'numeric') {
+        [res, err] = numericMeet(a, b);
+    } else if (af === 'enum' && bf === 'enum') {
+        [res, err] = enumMeet(a, b);
+    } else if (af === 'nested' && bf === 'nested') {
+        [res, err] = nestedMeet(a, b);
+    } else if (af === 'numeric' && bf === 'enum') {
+        [res, err] = numericEnumMeet(a, b);
+    } else if (af === 'enum' && bf === 'numeric') {
+        [res, err] = numericEnumMeet(b, a);
+    } else if (af === 'nested' || bf === 'nested') {
+        return [{}, 'no_overlap'];
+    } else {
+        return [{}, 'invalid_params_binding'];
+    }
+    if (err) {
+        return [{}, err];
+    }
+    return [copyBound(res, opt), ''];
+}
+
+function intersectBounds(
+    a: Record<string, unknown>,
+    b: Record<string, unknown>,
+): Record<string, unknown> {
+    const out: Record<string, unknown> = { ...a };
+    for (const [k, bv] of Object.entries(b)) {
+        if (k in out) {
+            const [m, err] = boundMeet(out[k], bv);
+            if (err) {
+                throw new SemanticsError(err);
+            }
+            out[k] = m;
+        } else {
+            out[k] = bv;
+        }
+    }
+    return out;
+}
+
+function entailsDeclared(
+    opParams: Record<string, unknown> | null | undefined,
+    grantParams: Record<string, unknown>,
+    grantBounds: Record<string, unknown>,
+): [boolean, string] {
+    for (const gv of Object.values(grantParams)) {
+        if (isEmptyBound(gv)) {
+            return [false, 'empty_bound_denies_class'];
+        }
+    }
+    for (const [k, gv] of Object.entries(grantParams)) {
+        if (gv === null) {
+            return [false, `invalid_params_null: ${k}`];
+        }
+    }
+    if (opParams != null) {
+        for (const [k, ov] of Object.entries(opParams)) {
+            if (ov === null) {
+                return [false, `invalid_params_null: ${k}`];
+            }
+        }
+    }
+    for (const k of Object.keys(grantParams)) {
+        if (opParams == null || !(k in opParams)) {
+            return [false, 'params_missing'];
+        }
+    }
+    for (const [k, b] of Object.entries(grantBounds)) {
+        if (boundOptional(b)) {
+            continue;
+        }
+        if (opParams == null || !(k in opParams)) {
+            return [false, 'params_missing'];
+        }
+    }
+    if (opParams != null) {
+        for (const k of Object.keys(opParams)) {
+            if (!(k in grantParams) && !(k in grantBounds)) {
+                return [false, `undeclared_param: ${k}`];
+            }
+        }
+    }
+    for (const [k, gv] of Object.entries(grantParams)) {
+        const [ok, reason] = valueSubset(opParams ? opParams[k] : undefined, gv);
+        if (!ok) {
+            return [false, reason];
+        }
+    }
+    for (const [k, b] of Object.entries(grantBounds)) {
+        if (opParams == null || !(k in opParams)) {
+            continue;
+        }
+        const [ok, reason] = boundSubset(opParams[k], b);
+        if (!ok) {
+            return [false, reason];
+        }
+    }
+    return [true, ''];
+}
+
+function boundWithin(child: unknown, parent: unknown): string | null {
+    if (!isPlainObject(child) || !isPlainObject(parent)) {
+        return 'params_not_narrower';
+    }
+    if (!boundOptional(parent) && boundOptional(child)) {
+        return 'params_not_narrower';
+    }
+    if (isNumber(parent['min'])) {
+        if (!isNumber(child['min']) || child['min'] < parent['min']) {
+            return 'params_not_narrower';
+        }
+    }
+    if (isNumber(parent['max'])) {
+        if (!isNumber(child['max']) || child['max'] > parent['max']) {
+            return 'params_not_narrower';
+        }
+    }
+    if (isNumber(parent['step'])) {
+        if (!isNumber(child['step']) || !isMultipleOf(child['step'], parent['step'])) {
+            return 'params_not_narrower';
+        }
+    }
+    if (Array.isArray(parent['enum'])) {
+        if (!Array.isArray(child['enum'])) {
+            return 'params_not_narrower';
+        }
+        const pe = parent['enum'];
+        for (const e of child['enum'] as unknown[]) {
+            if (!pe.some((p) => jsonEqual(e, p))) {
+                return 'params_not_narrower';
+            }
+        }
+    }
+    if (isNumber(parent['min_items'])) {
+        if (!isNumber(child['min_items']) || child['min_items'] < parent['min_items']) {
+            return 'params_not_narrower';
+        }
+    }
+    if (isNumber(parent['max_items'])) {
+        if (!isNumber(child['max_items']) || child['max_items'] > parent['max_items']) {
+            return 'params_not_narrower';
+        }
+    }
+    if (isPlainObject(parent['nested'])) {
+        if (!isPlainObject(child['nested'])) {
+            return 'params_not_narrower';
+        }
+        const pn = parent['nested'];
+        const cn = child['nested'];
+        for (const [k, pbn] of Object.entries(pn)) {
+            if (!(k in cn)) {
+                return 'params_not_narrower';
+            }
+            if (boundWithin(cn[k], pbn) != null) {
+                return 'params_not_narrower';
+            }
+        }
+        for (const k of Object.keys(cn)) {
+            if (!(k in pn)) {
+                return 'params_not_narrower';
+            }
+        }
+    }
+    return null;
+}
+
+// materializeDefaults applies the §6.5 scheme-default rule (explicit >
+// default > absent); a default never adds a key the grant does not declare.
+export function materializeDefaults(
+    grant: Grant,
+    op: Operation,
+    defaults?: Record<string, unknown> | null,
+): Operation {
+    if (defaults == null || Object.keys(defaults).length === 0) {
+        return op;
+    }
+    const declared = new Set([
+        ...Object.keys(grant.params ?? {}),
+        ...Object.keys(grant.param_bounds ?? {}),
+    ]);
+    const params: Record<string, unknown> = { ...(op.params ?? {}) };
+    let injected = false;
+    for (const [k, dv] of Object.entries(defaults)) {
+        if (!declared.has(k)) {
+            continue;
+        }
+        if (!(k in params)) {
+            params[k] = dv;
+            injected = true;
+        }
+    }
+    if (!injected) {
+        return op;
+    }
+    return { id: op.id, params };
+}
+
 // paramsSubset checks if operation params are a subset of grant params per
 // CLC-v1 §5.2 + §9.3 layers 5-9. When several conditions fail at once, the
 // resolved reason follows the fixed §9.3 ordering (empty bound, null,
@@ -962,42 +1555,172 @@ export function entails(grant: Grant, op: Operation): MatchResult {
     // (unconstrained; rev CLC-1.3 §9.3 makes {} ≡ absent).  Only absence and
     // {} count: a falsy scalar or an array must NOT be treated as
     // unconstrained — that was a fail-open (audit 2026-09-16, R6); such a
-    // grant is invalid_params_number below.
-    if (grant.params == null) {
+    // grant is invalid_params_number below.  rev CLC-1.10: a grant is
+    // unconstrained only when it declares neither params nor param_bounds.
+    const gp = grant.params;
+    const gb = grant.param_bounds;
+    const hasParams = gp != null && isPlainObject(gp) && Object.keys(gp).length > 0;
+    const hasBounds = gb != null && isPlainObject(gb) && Object.keys(gb).length > 0;
+    if (!hasParams && !hasBounds) {
         return { entails: true };
     }
-    const grantParams = grant.params as Record<string, unknown>;
-    if (isPlainObject(grantParams) && Object.keys(grantParams).length === 0) {
-        return { entails: true };
+
+    // §9.1 layer 2 (rev CLC-1.10): param_bounds grammar + binding rule.
+    const bindReason = validateParamBounds(gb, gp);
+    if (bindReason) {
+        return { entails: false, reason: bindReason };
     }
 
     // §9.3 layer 6 resolves before presence (layer 7): null values in either
     // side fail before an absent operation params object is judged
     // params_missing (validateParams also applies the §6.2 step 4 object-path
     // size/depth caps, rev CLC-1.2).
-    try {
-        validateParams(grant.params);
-    } catch (e) {
-        return { entails: false, reason: (e as SemanticsError).message };
+    if (hasParams) {
+        try {
+            validateParams(gp);
+        } catch (e) {
+            return { entails: false, reason: (e as SemanticsError).message };
+        }
     }
-    try {
-        validateParams(op.params);
-    } catch (e) {
-        return { entails: false, reason: (e as SemanticsError).message };
+    if (op.params != null) {
+        try {
+            validateParams(op.params);
+        } catch (e) {
+            return { entails: false, reason: (e as SemanticsError).message };
+        }
     }
 
-    // §6.3 step 4: op params absent → false (bounded grant, fail-closed).
-    if (op.params == null) {
-        return { entails: false, reason: 'params_missing' };
-    }
-
-    // §6.3 step 5: params subset.
-    const [ok, reason] = paramsSubset(op.params, grant.params);
+    // §6.3 steps 4–5: presence and params subset over the §6.5 declared set.
+    const [ok, reason] = entailsDeclared(
+        op.params,
+        (isPlainObject(gp) ? gp : {}) as Record<string, unknown>,
+        (isPlainObject(gb) ? gb : {}) as Record<string, unknown>,
+    );
     if (!ok) {
         return { entails: false, reason };
     }
 
     return { entails: true };
+}
+
+// Contains reports whether a child grant stays inside a parent grant's
+// declared authorization boundary, per draft-wei-clc-ext-00 §4 (CLD-D).
+//
+// The relation is compared on DECLARED sets and DECLARED bounds, not on
+// behavior (CLC-v1 §12 keeps that scope).  If any layer of §4 fails,
+// Contains is false with the first failing layer's reason code.  Layer
+// semantics match the extension draft:
+//   - layer 1: both grants valid (identifier + params grammar);
+//   - layer 2: child id covered by parent id via CLC-v1 path coverage;
+//   - layer 3: child params within parent's declared bounds and child key
+//     set closed by parent.
+//
+// Constraints are deliberately NOT part of this relation.  Constraints are a
+// separate axis that composes by UNION (conjunction) across a delegation chain
+// (see intersect, §7), not by subset: a child's constraint set is never
+// compared to its parent's here.  Delegation mode is likewise a carrier
+// concept (AIC-JWT DA binds it); the language relation takes no mode.
+export function contains(parent: Grant, child: Grant): MatchResult {
+    // Layer 1: grant validity — fail-closed on either side.  The reason is a
+    // valid CLC-A code (invalid_capability_id, invalid_params_*).
+    for (const g of [parent, child]) {
+        try {
+            validateCapabilityId(g.id);
+        } catch (e) {
+            return { entails: false, reason: (e as SemanticsError).message };
+        }
+        if (g.params != null) {
+            try {
+                validateParams(g.params);
+            } catch (e) {
+                return { entails: false, reason: (e as SemanticsError).message };
+            }
+        }
+        const bindReason = validateParamBounds(g.param_bounds, g.params);
+        if (bindReason) {
+            return { entails: false, reason: bindReason };
+        }
+    }
+
+    // Layer 2: identifier coverage — the CLC-v1 path-coverage relation,
+    // parameters excluded.  The extension §4.2 keeps the core's
+    // different_namespace for scheme/action-class mismatch and collapses every
+    // other coverage failure into the layer-2 reason child_exceeds_parent.
+    const [okId, idReason] = matchId(parent.id, child.id);
+    if (!okId) {
+        if (idReason === 'different_namespace') {
+            return { entails: false, reason: idReason };
+        }
+        return { entails: false, reason: 'child_exceeds_parent' };
+    }
+
+    // Layer 3: parameter narrowing.
+    const pp = parent.params;
+    const cp = child.params;
+    const pbn = parent.param_bounds;
+    const cbn = child.param_bounds;
+    const ppEmpty = pp == null || (isPlainObject(pp) && Object.keys(pp).length === 0);
+    const cpEmpty = cp == null || (isPlainObject(cp) && Object.keys(cp).length === 0);
+    const pbnEmpty = pbn == null || (isPlainObject(pbn) && Object.keys(pbn).length === 0);
+    const cbnEmpty = cbn == null || (isPlainObject(cbn) && Object.keys(cbn).length === 0);
+    if (ppEmpty && pbnEmpty) {
+        // Parent unconstrained (absent OR {}): contains any child params.
+    } else if (cpEmpty && cbnEmpty) {
+        // Child unconstrained under a bounded parent: declaring nothing is
+        // not "a subset of the parent's bounds" (§4.3 extra rule).
+        return { entails: false, reason: 'params_not_narrower' };
+    } else {
+        const parentParams = (pp ?? {}) as Record<string, unknown>;
+        const childParams = (cp ?? {}) as Record<string, unknown>;
+        const parentBounds = (pbn ?? {}) as Record<string, unknown>;
+        const childBounds = (cbn ?? {}) as Record<string, unknown>;
+        for (const k of Object.keys(parentParams)) {
+            if (!(k in childParams)) {
+                // Child omits the key, or declares it in the other
+                // representation (§6.5 binding rule).
+                return { entails: false, reason: 'params_not_narrower' };
+            }
+            if (containsWithin(childParams[k], parentParams[k]) != null) {
+                return { entails: false, reason: 'params_not_narrower' };
+            }
+        }
+        for (const k of Object.keys(parentBounds)) {
+            if (!(k in childBounds)) {
+                return { entails: false, reason: 'params_not_narrower' };
+            }
+            if (boundWithin(childBounds[k], parentBounds[k]) != null) {
+                return { entails: false, reason: 'params_not_narrower' };
+            }
+        }
+        // Key closure is symmetric: a child that adds a key the parent does
+        // not declare allows operations the parent denies (undeclared_param).
+        for (const k of Object.keys(childParams)) {
+            if (!(k in parentParams)) {
+                return { entails: false, reason: 'params_not_narrower' };
+            }
+        }
+        for (const k of Object.keys(childBounds)) {
+            if (!(k in parentBounds)) {
+                return { entails: false, reason: 'params_not_narrower' };
+            }
+        }
+    }
+
+    return { entails: true };
+}
+
+// containsWithin reports whether a child declared value is within a parent
+// declared bound using the same JSON subset semantic as §5.2 valueSubset
+// (numbers as upper bounds, arrays as membership sets, objects per key).
+function containsWithin(childVal: unknown, parentBound: unknown): string | null {
+    if (childVal == null) {
+        return 'invalid_params_null';
+    }
+    if (parentBound == null) {
+        return null;
+    }
+    const [ok, reason] = valueSubset(childVal, parentBound);
+    return ok ? null : reason;
 }
 
 // intersectValue intersects two values (§7; §9.3 layer 10 no_overlap on empty).
@@ -1051,10 +1774,36 @@ export function intersect(grants: Grant[]): Grant {
         }
     }
 
+    // rev CLC-1.14 §6.6: an explicit empty enum in a Bound denies the class.
+    for (const g of grants) {
+        if (boundsDenyClass(g.param_bounds)) {
+            throw new SemanticsError('empty_bound_denies_class');
+        }
+    }
+
+    // rev CLC-1.14 §6.6 "Key site": a key declared in params by one source and
+    // in param_bounds by another is refused.
+    const paramsKeys = new Set<string>();
+    const boundsKeys = new Set<string>();
+    for (const g of grants) {
+        for (const k of Object.keys(g.params ?? {})) {
+            paramsKeys.add(k);
+        }
+        for (const k of Object.keys(g.param_bounds ?? {})) {
+            boundsKeys.add(k);
+        }
+    }
+    for (const k of boundsKeys) {
+        if (paramsKeys.has(k)) {
+            throw new SemanticsError('invalid_params_binding');
+        }
+    }
+
     // Start with the first grant.
     const result: Grant = {
         id: grants[0].id,
         params: grants[0].params,
+        param_bounds: grants[0].param_bounds ? { ...grants[0].param_bounds } : grants[0].param_bounds,
         constraints: [...(grants[0].constraints ?? [])],
     };
 
@@ -1099,6 +1848,15 @@ export function intersect(grants: Grant[]): Grant {
         } else {
             // result is unconstrained (params absent), adopt g's params.
             result.params = g.params;
+        }
+
+        // §6.6 BoundMeet (rev CLC-1.14): union keys, meet shared ones.
+        const rb = result.param_bounds ?? {};
+        const gb = g.param_bounds ?? {};
+        if (Object.keys(rb).length > 0 && Object.keys(gb).length > 0) {
+            result.param_bounds = intersectBounds(rb, gb);
+        } else if (Object.keys(gb).length > 0) {
+            result.param_bounds = { ...gb };
         }
 
         // §7 rule 3: constraints are conjunctive, so the merge is a set union —
@@ -1362,6 +2120,11 @@ export function isParamsLevelReason(reason: string): boolean {
         'invalid_params_number',
         'invalid_params_size',
         'unsupported_language_revision',
+        // rev CLC-1.10/1.14: extended-bound reason codes are params-level too.
+        'params_cardinality',
+        'params_out_of_range',
+        'params_not_multiple',
+        'invalid_params_binding',
     ];
     return prefixes.some((p) => reason.startsWith(p));
 }
@@ -1512,4 +2275,183 @@ export function authorizeSet(
         return { verdict: VERDICT_ALLOW_UNRESOLVED, unresolved: uniq };
     }
     return { verdict: VERDICT_ALLOW };
+}
+// Resolution is a consumer's per-obligation report to resolve() (§8.5, rev
+// CLC-1.11).
+export interface Resolution {
+    constraint: string;
+    status: 'satisfied' | 'violated' | 'unknown';
+}
+
+const VALID_RESOLUTION_STATUSES = new Set(['satisfied', 'violated', 'unknown']);
+const RFC3339_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
+function validNow(now: string): Date | null {
+    if (!RFC3339_RE.test(now)) {
+        return null;
+    }
+    const d = new Date(now);
+    if (Number.isNaN(d.getTime())) {
+        return null;
+    }
+    return d;
+}
+
+// evalCoreTimeWindow returns true (in window) / false (outside) when c is a
+// core-recognized §8.1 time:window obligation, else null (not core-evaluable).
+function evalCoreTimeWindow(c: string, now: Date): boolean | null {
+    try {
+        validateConstraint(c);
+    } catch {
+        return null;
+    }
+    const parts = c.split(':');
+    if (parts.length < 2 || `${parts[0]}:${parts[1]}` !== `${RESERVED_SCHEME}:time`) {
+        return null;
+    }
+    const joined = constraintParams(c);
+    if (!joined.startsWith('window:')) {
+        return null;
+    }
+    let segments: Array<{ start: string; end: string }>;
+    try {
+        segments = JSON.parse(joined.slice('window:'.length));
+    } catch {
+        return null;
+    }
+    const sod = now.getUTCHours() * 3600 + now.getUTCMinutes() * 60 + now.getUTCSeconds();
+    for (const seg of segments) {
+        const start = secondsOfDay(seg.start);
+        let end = secondsOfDay(seg.end);
+        if (seg.end === '00:00') {
+            end = 86400;
+        }
+        if (sod >= start && sod < end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function violatedReason(c: string): string {
+    const parts = c.split(':');
+    if (parts.length >= 2 && parts[1]) {
+        return `${parts[1]}:violated`;
+    }
+    return 'violated';
+}
+
+function stricterStatus(a: 'satisfied' | 'violated' | 'unknown', b: 'satisfied' | 'violated' | 'unknown'): 'satisfied' | 'violated' | 'unknown' {
+    const rank: Record<string, number> = { violated: 2, satisfied: 1, unknown: 0 };
+    return rank[b] > rank[a] ? b : a;
+}
+
+// resolve collapses a decision's §8.4 obligations with consumer reports and an
+// optional clock (§8.5, rev CLC-1.11).  Deterministic, fail-closed, idempotent
+// and monotone; terminal deny/allow decisions pass through unchanged; it
+// neither invents nor drops obligations.
+export function resolve(
+    decision: Decision,
+    resolutions: Resolution[] = [],
+    now?: string | null,
+): Decision {
+    // Rule 1: terminal verdicts are fixed.
+    if (decision.verdict === VERDICT_DENY || decision.verdict === VERDICT_ALLOW) {
+        return { ...decision };
+    }
+    if (decision.verdict !== VERDICT_ALLOW_UNRESOLVED) {
+        return { verdict: VERDICT_DENY, reason: 'invalid_resolution' };
+    }
+
+    // Rule 2: malformed input fails closed, before any discharge.
+    for (const r of resolutions) {
+        if (!r || !r.constraint || !VALID_RESOLUTION_STATUSES.has(r.status)) {
+            return { verdict: VERDICT_DENY, reason: 'invalid_resolution' };
+        }
+    }
+    let nowDate: Date | null = null;
+    if (now !== undefined && now !== null) {
+        nowDate = validNow(now);
+        if (nowDate === null) {
+            return { verdict: VERDICT_DENY, reason: 'invalid_timestamp' };
+        }
+    }
+
+    // Rules 3-5: status per obligation, most-restrictive-first.
+    const obligations = [...new Set(decision.unresolved ?? [])].sort();
+    const remainder: string[] = [];
+    for (const o of obligations) {
+        let status: 'satisfied' | 'violated' | 'unknown' = 'unknown';
+        for (const r of resolutions) {
+            if (r.constraint === o) {
+                status = stricterStatus(status, r.status);
+            }
+        }
+        if (nowDate !== null) {
+            const clock = evalCoreTimeWindow(o, nowDate);
+            if (clock === true) {
+                status = stricterStatus(status, 'satisfied');
+            } else if (clock === false) {
+                status = stricterStatus(status, 'violated');
+            }
+        }
+        if (status === 'violated') {
+            return { verdict: VERDICT_DENY, reason: violatedReason(o) };
+        }
+        if (status !== 'satisfied') {
+            remainder.push(o);
+        }
+    }
+
+    if (remainder.length === 0) {
+        return { verdict: VERDICT_ALLOW };
+    }
+    return { verdict: VERDICT_ALLOW_UNRESOLVED, unresolved: remainder };
+}
+
+// constraintUnion is the derived chain-constraint projection (§7.1, rev
+// CLC-1.12): the normalized union of every constraint string carried by the
+// grants in chain — duplicates folded, lexically sorted.  A projection, not a
+// meet: it compares no identifiers or params, reads no constraint values and
+// checks no containment.  An empty chain fails closed with absent_source
+// (§7 rule 5).
+export function constraintUnion(chain: Grant[]): string[] {
+    if (chain.length === 0) {
+        throw new SemanticsError('absent_source');
+    }
+    const out = new Set<string>();
+    for (const g of chain) {
+        for (const c of g.constraints ?? []) {
+            out.add(c);
+        }
+    }
+    return [...out].sort();
+}
+
+// authorizeWithChain is the fused chain check (§13.11, rev CLC-1.13, CLC-D):
+// each adjacent hop is checked with contains(), and the operation is
+// authorized against intersect(chain).  An empty chain denies absent_source;
+// the first hop whose containment fails ends the call with that hop's §13.5
+// reason code (before op validation); an intersect refusal is returned as
+// deny(reason).  Judging the operation against the intersection is what brings
+// every ancestor's params and constraints into force — constraints are outside
+// containment (a union axis), so authorizing against the leaf alone would be
+// unsound.
+export function authorizeWithChain(chain: Grant[], op: Operation): Decision {
+    if (chain.length === 0) {
+        return { verdict: VERDICT_DENY, reason: 'absent_source' };
+    }
+    for (let i = 0; i + 1 < chain.length; i++) {
+        const r = contains(chain[i], chain[i + 1]);
+        if (!r.entails) {
+            return { verdict: VERDICT_DENY, reason: r.reason ?? 'child_exceeds_parent' };
+        }
+    }
+    let effective: Grant;
+    try {
+        effective = intersect(chain);
+    } catch (e) {
+        return { verdict: VERDICT_DENY, reason: (e as Error).message };
+    }
+    return authorize(effective, op);
 }
