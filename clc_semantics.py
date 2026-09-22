@@ -6,6 +6,7 @@ It is NOT a translation of the Go implementation; it follows the spec directly.
 The对外判决 must match the Go implementation exactly.
 """
 import base64
+import datetime
 import hashlib
 import json
 import math
@@ -70,6 +71,22 @@ class InvalidParamsSize(CLCError):
     pass
 
 
+class InvalidParamsBinding(CLCError):
+    pass
+
+
+class ParamsCardinality(CLCError):
+    pass
+
+
+class ParamsOutOfRange(CLCError):
+    pass
+
+
+class ParamsNotMultiple(CLCError):
+    pass
+
+
 class UnsupportedLanguageRevision(CLCError):
     pass
 
@@ -117,7 +134,7 @@ RECOGNIZED_CONSTRAINT_IDENTITIES = {
 # shortcuts escape as two, every other control as `\u00xx` (six), and
 # `&`/`<`/`>`/U+2028/U+2029/non-ASCII stay raw — so the raw and decoded
 # limits agree; CLC-1.4/1.5 inputs still read.)
-CLC_REVISION = "CLC-1.8"
+CLC_REVISION = "CLC-1.14"
 # §6.2 step 4: bounds on the JCS-serialized params form.
 MAX_PARAMS_SERIALIZED_BYTES = 512
 MAX_PARAMS_NESTING = 32
@@ -609,6 +626,213 @@ def has_empty_bound(params: dict) -> bool:
     return any(is_empty_bound(v) for v in params.values())
 
 
+def _bound_family(b: Any) -> str:
+    """§6.6 Bound value family (or 'none' for an empty Bound)."""
+    if not isinstance(b, dict):
+        return "invalid"
+    if "nested" in b:
+        return "nested"
+    if any(k in b for k in ("enum", "min_items", "max_items")):
+        return "enum"
+    if any(k in b for k in ("min", "max", "step")):
+        return "numeric"
+    return "none"
+
+
+def _canonical_enum_members(members: list) -> list:
+    """Dedupe enum members and order them by their JCS rendering (P11)."""
+    seen = {}
+    for m in members:
+        try:
+            k = canonical_json(m)
+        except Exception:
+            k = repr(m)
+        if k not in seen:
+            seen[k] = m
+    return [seen[k] for k in sorted(seen)]
+
+
+def _bound_denies_class(b: Any) -> bool:
+    """A Bound with an explicitly empty enum denies its class (recursing nested)."""
+    if not isinstance(b, dict):
+        return False
+    if isinstance(b.get("enum"), list) and len(b["enum"]) == 0:
+        return True
+    nm = b.get("nested")
+    if isinstance(nm, dict):
+        return any(_bound_denies_class(x) for x in nm.values())
+    return False
+
+
+def _bounds_deny_class(bounds: Any) -> bool:
+    return isinstance(bounds, dict) and any(_bound_denies_class(b) for b in bounds.values())
+
+
+def _max_of(a: Any, b: Any) -> tuple[Any, bool]:
+    if isinstance(a, (int, float)) and not isinstance(a, bool) and isinstance(b, (int, float)) and not isinstance(b, bool):
+        return (a if a > b else b), True
+    if isinstance(a, (int, float)) and not isinstance(a, bool):
+        return a, True
+    if isinstance(b, (int, float)) and not isinstance(b, bool):
+        return b, True
+    return None, False
+
+
+def _min_of(a: Any, b: Any) -> tuple[Any, bool]:
+    if isinstance(a, (int, float)) and not isinstance(a, bool) and isinstance(b, (int, float)) and not isinstance(b, bool):
+        return (a if a < b else b), True
+    if isinstance(a, (int, float)) and not isinstance(a, bool):
+        return a, True
+    if isinstance(b, (int, float)) and not isinstance(b, bool):
+        return b, True
+    return None, False
+
+
+def bound_meet(a: Any, b: Any) -> tuple[dict, str]:
+    """§6.6 meet of two Bounds for the same key.  Returns (bound, reason);
+    reason is '' on success, else the fail-closed §9.2 code."""
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return {}, "invalid_params_binding"
+    am = {k: v for k, v in a.items()}
+    bm = {k: v for k, v in b.items()}
+    opt = _bound_optional(am) and _bound_optional(bm)
+    af, bf = _bound_family(am), _bound_family(bm)
+    if af == "invalid" or bf == "invalid":
+        return {}, "invalid_params_binding"
+    if af == "none" or bf == "none":
+        src = bm if af == "none" else am
+        res = {k: v for k, v in src.items() if k != "optional"}
+        if opt:
+            res["optional"] = True
+        return res, ""
+    if af == "numeric" and bf == "numeric":
+        res, err = _numeric_meet(am, bm)
+    elif af == "enum" and bf == "enum":
+        res, err = _enum_meet(am, bm)
+    elif af == "nested" and bf == "nested":
+        res, err = _nested_meet(am, bm)
+    elif af == "numeric" and bf == "enum":
+        res, err = _numeric_enum_meet(am, bm)
+    elif af == "enum" and bf == "numeric":
+        res, err = _numeric_enum_meet(bm, am)
+    elif af == "nested" or bf == "nested":
+        return {}, "no_overlap"
+    else:
+        return {}, "invalid_params_binding"
+    if err:
+        return {}, err
+    res.pop("optional", None)
+    if opt:
+        res["optional"] = True
+    return res, ""
+
+
+def _numeric_meet(a: dict, b: dict) -> tuple[dict, str]:
+    res: dict = {}
+    mv, ok = _max_of(a.get("min"), b.get("min"))
+    if ok:
+        res["min"] = mv
+    mv, ok = _min_of(a.get("max"), b.get("max"))
+    if ok:
+        res["max"] = mv
+    astep, bstep = a.get("step"), b.get("step")
+    if isinstance(astep, (int, float)) and isinstance(bstep, (int, float)):
+        if _is_multiple_of(astep, bstep):
+            res["step"] = astep
+        elif _is_multiple_of(bstep, astep):
+            res["step"] = bstep
+        else:
+            return {}, "invalid_params_binding"
+    elif isinstance(astep, (int, float)):
+        res["step"] = astep
+    elif isinstance(bstep, (int, float)):
+        res["step"] = bstep
+    if "min" in res and "max" in res and res["min"] > res["max"]:
+        return {}, "no_overlap"
+    return res, ""
+
+
+def _enum_meet(a: dict, b: dict) -> tuple[dict, str]:
+    res: dict = {}
+    ae, be = a.get("enum"), b.get("enum")
+    if isinstance(ae, list) and isinstance(be, list):
+        inter = [x for x in ae if x in be]
+        if len(inter) == 0:
+            return {}, "no_overlap"
+        res["enum"] = _canonical_enum_members(inter)
+    elif isinstance(ae, list):
+        res["enum"] = list(ae)
+    elif isinstance(be, list):
+        res["enum"] = list(be)
+    mv, ok = _max_of(a.get("min_items"), b.get("min_items"))
+    if ok:
+        res["min_items"] = mv
+    mv, ok = _min_of(a.get("max_items"), b.get("max_items"))
+    if ok:
+        res["max_items"] = mv
+    if "min_items" in res and "max_items" in res and res["min_items"] > res["max_items"]:
+        return {}, "no_overlap"
+    return res, ""
+
+
+def _numeric_enum_meet(num: dict, en: dict) -> tuple[dict, str]:
+    e = en.get("enum")
+    if not isinstance(e, list):
+        return {}, "invalid_params_binding"
+    filtered = []
+    for mem in e:
+        if not isinstance(mem, (int, float)) or isinstance(mem, bool):
+            continue
+        ok = True
+        if isinstance(num.get("min"), (int, float)) and mem < num["min"]:
+            ok = False
+        if isinstance(num.get("max"), (int, float)) and mem > num["max"]:
+            ok = False
+        if isinstance(num.get("step"), (int, float)) and not _is_multiple_of(mem, num["step"]):
+            ok = False
+        if ok:
+            filtered.append(mem)
+    if len(filtered) == 0:
+        return {}, "no_overlap"
+    res: dict = {"enum": _canonical_enum_members(filtered)}
+    if "min_items" in en:
+        res["min_items"] = en["min_items"]
+    if "max_items" in en:
+        res["max_items"] = en["max_items"]
+    return res, ""
+
+
+def _nested_meet(a: dict, b: dict) -> tuple[dict, str]:
+    an, bn = a.get("nested"), b.get("nested")
+    if not isinstance(an, dict) or not isinstance(bn, dict) or len(an) != len(bn):
+        return {}, "no_overlap"
+    res: dict = {}
+    for k, av in an.items():
+        if k not in bn:
+            return {}, "no_overlap"
+        m, err = bound_meet(av, bn[k])
+        if err:
+            return {}, err
+        res[k] = m
+    return {"nested": res}, ""
+
+
+def _intersect_bounds(a: dict, b: dict) -> dict:
+    """Union keys and meet shared ones (§6.6)."""
+    out = {k: v for k, v in a.items()}
+    for k, bv in b.items():
+        if k in out:
+            m, err = bound_meet(out[k], bv)
+            if err:
+                if err == "no_overlap":
+                    raise CapabilityNotAuthorized(err)
+                raise InvalidParamsBinding(err)
+            out[k] = m
+        else:
+            out[k] = bv
+    return out
+
+
 def params_subset(op_params: Optional[dict], grant_params: Optional[dict]) -> tuple[bool, str]:
     """Check if operation params are a subset of grant params per CLC-v1 §5.2.
     When several conditions fail at once, the resolved reason follows
@@ -728,6 +952,192 @@ def value_subset(op_val: Any, grant_val: Any) -> tuple[bool, str]:
     return True, ""
 
 
+def _is_number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _bound_optional(b: Any) -> bool:
+    return isinstance(b, dict) and b.get("optional") is True
+
+
+def _validate_bound(b: Any) -> str:
+    """Validate a §6.5 Bound object (rev CLC-1.10); return "" or a reason."""
+    if not isinstance(b, dict):
+        return "invalid_params_binding: bound is not an object"
+    has_numeric = has_enum = has_nested = False
+    for k in b:
+        if k in ("min", "max", "step"):
+            has_numeric = True
+        elif k in ("enum", "min_items", "max_items"):
+            has_enum = True
+        elif k == "nested":
+            has_nested = True
+        elif k == "optional":
+            if not isinstance(b[k], bool):
+                return "invalid_params_binding: optional is not a boolean"
+        else:
+            return f"invalid_params_binding: unknown Bound member {k}"
+    if (1 if has_numeric else 0) + (1 if has_enum else 0) + (1 if has_nested else 0) > 1:
+        return "invalid_params_binding: mixed bound families"
+    for k in ("min", "max", "step"):
+        if k in b and not _is_number(b[k]):
+            return f"invalid_params_binding: {k} is not a number"
+    if "step" in b and b["step"] <= 0:
+        return "invalid_params_binding: step must be positive"
+    if "min" in b and "max" in b and b["min"] > b["max"]:
+        return "invalid_params_binding: min > max"
+    if "enum" in b and not isinstance(b["enum"], list):
+        return "invalid_params_binding: enum is not an array"
+    for k in ("min_items", "max_items"):
+        if k in b:
+            n = b[k]
+            if not _is_number(n) or n < 0 or n != int(n):
+                return f"invalid_params_binding: {k} is not a non-negative integer"
+    if "min_items" in b and "max_items" in b and b["min_items"] > b["max_items"]:
+        return "invalid_params_binding: min_items > max_items"
+    if "nested" in b:
+        if not isinstance(b["nested"], dict):
+            return "invalid_params_binding: nested is not an object"
+        for nb in b["nested"].values():
+            r = _validate_bound(nb)
+            if r:
+                return r
+    return ""
+
+
+def validate_param_bounds(bounds: Optional[dict], params: Optional[dict]) -> str:
+    """§6.5 bound grammar + one-representation binding rule; "" if valid."""
+    if bounds is None:
+        return ""
+    try:
+        validate_params(bounds)
+    except CLCError as e:
+        return str(e)
+    for k, b in bounds.items():
+        if k == "":
+            return "invalid_params_binding: empty key"
+        if params and k in params:
+            return f"invalid_params_binding: {k} in both params and param_bounds"
+        r = _validate_bound(b)
+        if r:
+            return r
+    return ""
+
+
+def _is_multiple_of(v: Any, step: Any) -> bool:
+    if step == 0:
+        return False
+    q = v / step
+    return q == int(q) and q * step == v
+
+
+def _nested_subset(op: dict, nested: dict) -> tuple[bool, str]:
+    for k, b in nested.items():
+        if k not in op:
+            if _bound_optional(b):
+                continue
+            return False, "params_missing"
+        ok, reason = bound_subset(op[k], b)
+        if not ok:
+            return False, reason
+    for k in op:
+        if k not in nested:
+            return False, f"undeclared_param: {k}"
+    return True, ""
+
+
+def bound_subset(op_val: Any, bound: Any) -> tuple[bool, str]:
+    """Check an operation value against a §6.5 Bound (rev CLC-1.10)."""
+    if not isinstance(bound, dict):
+        return False, "invalid_params_binding"
+    if "enum" in bound:
+        gv = bound["enum"]
+        if len(gv) == 0:
+            return False, "empty_bound_denies_class"
+        elems = op_val if isinstance(op_val, list) else [op_val]
+        for o in elems:
+            if o not in gv:
+                return False, "not_in_enum"
+    if "min_items" in bound or "max_items" in bound:
+        card = len(op_val) if isinstance(op_val, list) else 1
+        if "min_items" in bound and card < bound["min_items"]:
+            return False, "params_cardinality"
+        if "max_items" in bound and card > bound["max_items"]:
+            return False, "params_cardinality"
+    if "nested" in bound:
+        if not isinstance(op_val, dict):
+            return False, "params_exceed_grant"
+        return _nested_subset(op_val, bound["nested"])
+    if any(k in bound for k in ("min", "max", "step")):
+        if not _is_number(op_val):
+            return False, "params_exceed_grant"
+        if "min" in bound and op_val < bound["min"]:
+            return False, "params_out_of_range"
+        if "max" in bound and op_val > bound["max"]:
+            return False, "params_out_of_range"
+        if "step" in bound and not _is_multiple_of(op_val, bound["step"]):
+            return False, "params_not_multiple"
+    return True, ""
+
+
+def _entails_declared(op_params: Optional[dict], grant_params: dict,
+                      grant_bounds: dict) -> tuple[bool, str]:
+    for gv in grant_params.values():
+        if is_empty_bound(gv):
+            return False, "empty_bound_denies_class"
+    for k, gv in grant_params.items():
+        if gv is None:
+            return False, f"invalid_params_null: {k}"
+    if op_params is not None:
+        for k, ov in op_params.items():
+            if ov is None:
+                return False, f"invalid_params_null: {k}"
+    declared = set(grant_params) | set(grant_bounds)
+    for k in grant_params:
+        if op_params is None or k not in op_params:
+            return False, "params_missing"
+    for k, b in grant_bounds.items():
+        if _bound_optional(b):
+            continue
+        if op_params is None or k not in op_params:
+            return False, "params_missing"
+    if op_params is not None:
+        for k in op_params:
+            if k not in declared:
+                return False, f"undeclared_param: {k}"
+    for k, gv in grant_params.items():
+        ok, reason = value_subset(op_params[k], gv)
+        if not ok:
+            return False, reason
+    for k, b in grant_bounds.items():
+        if op_params is None or k not in op_params:
+            continue
+        ok, reason = bound_subset(op_params[k], b)
+        if not ok:
+            return False, reason
+    return True, ""
+
+
+def materialize_defaults(grant: dict, op: dict, defaults: Optional[dict]) -> dict:
+    """Apply the §6.5 scheme-default rule (explicit > default > absent)."""
+    if not defaults:
+        return op
+    declared = set(grant.get("params") or {}) | set(grant.get("param_bounds") or {})
+    params = dict(op.get("params") or {})
+    injected = False
+    for k, dv in defaults.items():
+        if k not in declared:
+            continue
+        if k not in params:
+            params[k] = dv
+            injected = True
+    if not injected:
+        return op
+    out = dict(op)
+    out["params"] = params
+    return out
+
+
 def entails(grant: dict, op: dict) -> dict:
     """Check if a grant covers an operation per CLC-v1 §5."""
     try:
@@ -755,28 +1165,35 @@ def entails(grant: dict, op: dict) -> dict:
     # (unconstrained; rev CLC-1.3 §9.3 makes {} ≡ absent).  Only absence
     # and {} count: a falsy scalar or an array must NOT be treated as
     # unconstrained — that was a fail-open (audit 2026-09-16, R6); such a
-    # grant is invalid_params_number below.
+    # grant is invalid_params_number below.  rev CLC-1.10: a grant is
+    # unconstrained only when it declares neither params nor param_bounds.
     gp = grant.get("params")
-    if gp is None or gp == {}:
+    gb = grant.get("param_bounds")
+    has_params = gp is not None and len(gp) > 0
+    has_bounds = gb is not None and len(gb) > 0
+    if not has_params and not has_bounds:
         return {"entails": True}
 
+    # §9.1 layer 2 (rev CLC-1.10): param_bounds grammar + binding rule.
+    r = validate_param_bounds(gb, gp)
+    if r:
+        return {"entails": False, "reason": r}
+
     # Validate null values
-    try:
-        validate_params(gp)
-    except CLCError as e:
-        return {"entails": False, "reason": str(e)}
+    if has_params:
+        try:
+            validate_params(gp)
+        except CLCError as e:
+            return {"entails": False, "reason": str(e)}
 
-    try:
-        validate_params(op.get("params"))
-    except CLCError as e:
-        return {"entails": False, "reason": str(e)}
+    if op.get("params") is not None:
+        try:
+            validate_params(op.get("params"))
+        except CLCError as e:
+            return {"entails": False, "reason": str(e)}
 
-    # §5.3 step 4: op params absent → false (bounded grant, fail-closed)
-    if op.get("params") is None:
-        return {"entails": False, "reason": "params_missing"}
-
-    # §5.3 step 5: params subset
-    ok, reason = params_subset(op.get("params"), gp)
+    # §5.3 steps 4-5: presence and subset over the §6.5 declared set.
+    ok, reason = _entails_declared(op.get("params"), gp or {}, gb or {})
     if not ok:
         return {"entails": False, "reason": reason}
 
@@ -793,6 +1210,20 @@ def intersect(grants: list[dict]) -> dict:
     for g in grants:
         if g.get("params") and has_empty_bound(g["params"]):
             raise CapabilityNotAuthorized("empty_bound_denies_class")
+
+    # rev CLC-1.14 §6.6: an explicit empty enum in a Bound denies the class.
+    for g in grants:
+        if _bounds_deny_class(g.get("param_bounds")):
+            raise CapabilityNotAuthorized("empty_bound_denies_class")
+
+    # rev CLC-1.14 §6.6 "Key site": a key declared in params by one source and
+    # in param_bounds by another is refused.
+    params_keys, bounds_keys = set(), set()
+    for g in grants:
+        params_keys.update((g.get("params") or {}).keys())
+        bounds_keys.update((g.get("param_bounds") or {}).keys())
+    if params_keys & bounds_keys:
+        raise InvalidParamsBinding("invalid_params_binding")
 
     result = grants[0].copy()
 
@@ -838,6 +1269,13 @@ def intersect(grants: list[dict]) -> dict:
         else:
             # result is unconstrained (params absent), adopt g params
             result["params"] = g["params"]
+
+        # Intersect param_bounds (§6.6 BoundMeet, rev CLC-1.14).
+        rb, gb = result.get("param_bounds") or {}, g.get("param_bounds") or {}
+        if rb and gb:
+            result["param_bounds"] = _intersect_bounds(rb, gb)
+        elif gb:
+            result["param_bounds"] = dict(gb)
 
         # Merge constraints (§7 rule 3): constraints are conjunctive, so the
         # merge is a set *union* — every constraint of every source stays in
@@ -957,6 +1395,151 @@ def check_constraint(c: str, op: dict) -> Optional[str]:
         if rows > max_val:
             return "max_rows:violated"
 
+    return None
+
+
+def _bound_within(child: Any, parent: Any) -> Optional[str]:
+    """Report whether a child Bound is within a parent Bound (§13.4.3,
+    rev CLC-1.10); None means within."""
+    if not isinstance(child, dict) or not isinstance(parent, dict):
+        return "params_not_narrower"
+    if not _bound_optional(parent) and _bound_optional(child):
+        return "params_not_narrower"
+    if "min" in parent:
+        if "min" not in child or child["min"] < parent["min"]:
+            return "params_not_narrower"
+    if "max" in parent:
+        if "max" not in child or child["max"] > parent["max"]:
+            return "params_not_narrower"
+    if "step" in parent:
+        if "step" not in child or not _is_multiple_of(child["step"], parent["step"]):
+            return "params_not_narrower"
+    if "enum" in parent:
+        if "enum" not in child:
+            return "params_not_narrower"
+        for e in child["enum"]:
+            if e not in parent["enum"]:
+                return "params_not_narrower"
+    if "min_items" in parent:
+        if "min_items" not in child or child["min_items"] < parent["min_items"]:
+            return "params_not_narrower"
+    if "max_items" in parent:
+        if "max_items" not in child or child["max_items"] > parent["max_items"]:
+            return "params_not_narrower"
+    if "nested" in parent:
+        if "nested" not in child:
+            return "params_not_narrower"
+        pc, cc = parent["nested"], child["nested"]
+        for k, pbn in pc.items():
+            if k not in cc:
+                return "params_not_narrower"
+            if _bound_within(cc[k], pbn) is not None:
+                return "params_not_narrower"
+        for k in cc:
+            if k not in pc:
+                return "params_not_narrower"
+    return None
+
+
+def contains(parent: dict, child: dict) -> dict:
+    """Report whether a child grant stays inside a parent grant's declared
+    authorization boundary, per draft-wei-clc-ext-00 §4 (CLD-D).
+
+    The relation is compared on DECLARED sets and DECLARED bounds, not on
+    behavior (CLC-v1 §12 keeps that scope).  If any layer of §4 fails,
+    contains is False with the first failing layer's reason code.
+
+    Layer semantics match the extension draft:
+      - layer 1: both grants valid (identifier + params grammar);
+      - layer 2: child id covered by parent id via CLC-v1 path coverage;
+      - layer 3: child params within parent's declared bounds and child key
+        set closed by parent.
+
+    Constraints are deliberately NOT part of this relation.  Constraints are a
+    separate axis that composes by UNION (conjunction) across a delegation
+    chain (see intersect, §7), not by subset: a child's constraint set is never
+    compared to its parent's here.  Delegation mode is likewise a carrier
+    concept (AIC-JWT DA binds it); the language relation takes no mode.
+    """
+    # Layer 1: grant validity — fail-closed on either side.  The reason is a
+    # valid CLC-A code (invalid_capability_id, invalid_params_*).
+    for g in (parent, child):
+        try:
+            validate_capability_id(g["id"])
+        except CLCError as e:
+            return {"contains": False, "reason": str(e)}
+        gp = g.get("params")
+        if gp is not None:
+            try:
+                validate_params(gp)
+            except CLCError as e:
+                return {"contains": False, "reason": str(e)}
+        r = validate_param_bounds(g.get("param_bounds"), gp)
+        if r:
+            return {"contains": False, "reason": r}
+
+    # Layer 2: identifier coverage — the CLC-v1 path-coverage relation,
+    # parameters excluded.  The extension §4.2 keeps the core's
+    # different_namespace for scheme/action-class mismatch and collapses every
+    # other coverage failure into the layer-2 reason child_exceeds_parent.
+    ok, reason = match_id(parent["id"], child["id"])
+    if not ok:
+        if reason == "different_namespace":
+            return {"contains": False, "reason": reason}
+        return {"contains": False, "reason": "child_exceeds_parent"}
+
+    # Layer 3: parameter narrowing.
+    pp = parent.get("params")
+    cp = child.get("params")
+    pbn = parent.get("param_bounds")
+    cbn = child.get("param_bounds")
+    if (pp is None or pp == {}) and (pbn is None or pbn == {}):
+        # Parent unconstrained (absent OR {}): contains any child params.
+        pass
+    elif (cp is None or cp == {}) and (cbn is None or cbn == {}):
+        # Child unconstrained under a bounded parent: declaring nothing is
+        # not "a subset of the parent's bounds" (§4.3 extra rule).
+        return {"contains": False, "reason": "params_not_narrower"}
+    else:
+        pp = pp or {}
+        cp = cp or {}
+        pbn = pbn or {}
+        cbn = cbn or {}
+        for k, pv in pp.items():
+            if k not in cp:
+                # Child omits a key the parent constrains, or declares it in
+                # the other representation (§6.5 binding rule).
+                return {"contains": False, "reason": "params_not_narrower"}
+            if _contains_within(cp[k], pv) is not None:
+                return {"contains": False, "reason": "params_not_narrower"}
+        for k, pb in pbn.items():
+            if k not in cbn:
+                return {"contains": False, "reason": "params_not_narrower"}
+            if _bound_within(cbn[k], pb) is not None:
+                return {"contains": False, "reason": "params_not_narrower"}
+        # Key closure is symmetric: a child that adds a key the parent does
+        # not declare allows operations the parent denies (undeclared_param).
+        for k in cp:
+            if k not in pp:
+                return {"contains": False, "reason": "params_not_narrower"}
+        for k in cbn:
+            if k not in pbn:
+                return {"contains": False, "reason": "params_not_narrower"}
+
+    return {"contains": True, "reason": ""}
+
+
+def _contains_within(child_val: Any, parent_bound: Any) -> Optional[str]:
+    """Report whether a child declared value is within a parent declared
+    bound using the same JSON subset semantic as §5.2 value_subset (numbers
+    as upper bounds, arrays as membership sets, objects per key)."""
+    if child_val is None:
+        return "invalid_params_null"
+    if parent_bound is None:
+        return None
+    ok, reason = value_subset(child_val, parent_bound)
+    if not ok:
+        return reason
     return None
 
 
@@ -1124,6 +1707,13 @@ def _is_params_level_reason(reason: str) -> bool:
         "invalid_params_number",
         "invalid_params_size",
         "unsupported_language_revision",
+        # rev CLC-1.10/1.14: the extended-bound reason codes are params-level
+        # too, so an authorize() over a grant carrying param_bounds reports
+        # the specific bound denial rather than collapsing it.
+        "params_cardinality",
+        "params_out_of_range",
+        "params_not_multiple",
+        "invalid_params_binding",
     ))
 
 
@@ -1246,3 +1836,146 @@ def authorize_set(grants: list, op: dict) -> dict:
     if uniq:
         return {"verdict": VERDICT_ALLOW_UNRESOLVED, "unresolved": uniq}
     return {"verdict": VERDICT_ALLOW}
+
+
+VALID_RESOLUTION_STATUSES = ("satisfied", "violated", "unknown")
+
+
+_RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
+
+
+def _valid_now(now: str) -> Optional[Any]:
+    """Parse an RFC3339 UTC instant; None when malformed (§8.5)."""
+    if not isinstance(now, str) or not _RFC3339_RE.match(now):
+        return None
+    try:
+        s = now.replace("Z", "+00:00")
+        dt = datetime.datetime.fromisoformat(s)
+    except (ValueError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.astimezone(datetime.timezone.utc)
+
+
+def _eval_core_time_window(c: str, now: Any) -> Optional[bool]:
+    """Return True (in window) / False (outside) when c is a core-recognized
+    §8.1 time:window obligation, else None (not core-evaluable, §8.5)."""
+    try:
+        validate_constraint(c)
+    except CLCError:
+        return None
+    parts = c.split(":")
+    if len(parts) < 2 or f"{parts[0]}:{parts[1]}" != f"{RESERVED_SCHEME}:time":
+        return None
+    joined = _constraint_params(c)
+    if not joined.startswith("window:"):
+        return None
+    segments = json.loads(joined[len("window:"):])
+    sod = now.hour * 3600 + now.minute * 60 + now.second
+    for seg in segments:
+        start = _seconds_of_day(seg["start"])
+        end = _seconds_of_day(seg["end"])
+        if seg["end"] == "00:00":
+            end = 86400
+        if start <= sod < end:
+            return True
+    return False
+
+
+def _violated_reason(c: str) -> str:
+    """The {type}:violated code of a constraint (§9.2, §8.5)."""
+    parts = c.split(":")
+    if len(parts) >= 2 and parts[1]:
+        return f"{parts[1]}:violated"
+    return "violated"
+
+
+def _stricter_status(a: str, b: str) -> str:
+    rank = {"violated": 2, "satisfied": 1, "unknown": 0}
+    return b if rank[b] > rank[a] else a
+
+
+def resolve(decision: dict, resolutions: Optional[list] = None, now: Optional[str] = None) -> dict:
+    """Collapse a decision's §8.4 obligations with consumer reports and an
+    optional clock (§8.5, rev CLC-1.11).
+
+    Deterministic, fail-closed, idempotent and monotone; terminal deny/allow
+    decisions pass through unchanged; it neither invents nor drops
+    obligations."""
+    resolutions = resolutions or []
+    # Rule 1: terminal verdicts are fixed.
+    if decision.get("verdict") in (VERDICT_DENY, VERDICT_ALLOW):
+        return dict(decision)
+    if decision.get("verdict") != VERDICT_ALLOW_UNRESOLVED:
+        return {"verdict": VERDICT_DENY, "reason": "invalid_resolution"}
+
+    # Rule 2: malformed input fails closed, before any discharge.
+    for r in resolutions:
+        if not isinstance(r, dict) or not r.get("constraint") or r.get("status") not in VALID_RESOLUTION_STATUSES:
+            return {"verdict": VERDICT_DENY, "reason": "invalid_resolution"}
+    now_dt = None
+    if now is not None:
+        now_dt = _valid_now(now)
+        if now_dt is None:
+            return {"verdict": VERDICT_DENY, "reason": "invalid_timestamp"}
+
+    # Rules 3-5: status per obligation, most-restrictive-first.
+    obligations = sorted(set(decision.get("unresolved") or []))
+    remainder = []
+    for o in obligations:
+        status = "unknown"
+        for r in resolutions:
+            if r["constraint"] == o:
+                status = _stricter_status(status, r["status"])
+        if now_dt is not None:
+            clock = _eval_core_time_window(o, now_dt)
+            if clock is True:
+                status = _stricter_status(status, "satisfied")
+            elif clock is False:
+                status = _stricter_status(status, "violated")
+        if status == "violated":
+            return {"verdict": VERDICT_DENY, "reason": _violated_reason(o)}
+        if status != "satisfied":
+            remainder.append(o)
+
+    if not remainder:
+        return {"verdict": VERDICT_ALLOW}
+    return {"verdict": VERDICT_ALLOW_UNRESOLVED, "unresolved": remainder}
+
+
+def constraint_union(chain: list) -> list:
+    """The derived chain-constraint projection (§7.1, rev CLC-1.12): the
+    normalized union of every constraint string carried by the grants in
+    chain — duplicates folded, lexically sorted.  A projection, not a meet:
+    it compares no identifiers or params, reads no constraint values and
+    checks no containment.  An empty chain fails closed with absent_source
+    (§7 rule 5)."""
+    if not chain:
+        raise CapabilityNotAuthorized("absent_source")
+    out = set()
+    for g in chain:
+        out.update(g.get("constraints") or [])
+    return sorted(out)
+
+
+def authorize_with_chain(chain: list, op: dict) -> dict:
+    """The fused chain check (§13.11, rev CLC-1.13, CLC-D): each adjacent hop
+    is checked with contains(), and the operation is authorized against
+    intersect(chain).  An empty chain denies absent_source; the first hop whose
+    containment fails ends the call with that hop's §13.5 reason code (before
+    op validation); an intersect refusal is returned as deny(reason).  Judging
+    the operation against the intersection is what brings every ancestor's
+    params and constraints into force — constraints are outside containment
+    (a union axis), so authorizing against the leaf alone would be unsound."""
+    if not chain:
+        return {"verdict": VERDICT_DENY, "reason": "absent_source"}
+    for i in range(len(chain) - 1):
+        r = contains(chain[i], chain[i + 1])
+        if not r["contains"]:
+            return {"verdict": VERDICT_DENY, "reason": r["reason"]}
+    try:
+        effective = intersect(chain)
+    except CLCError as e:
+        return {"verdict": VERDICT_DENY, "reason": str(e)}
+    return authorize(effective, op)
