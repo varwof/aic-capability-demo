@@ -23,7 +23,7 @@ jobs:
         run: git clone --depth 1 https://github.com/varwof/capability.git ../capability
 
       - name: Syntax check
-        run: python3 -m py_compile clc_semantics.py vectors-run.py
+        run: python3 -m py_compile clc_semantics.py vectors-run.py contains-vectors-run.py contain-property-run.py param-bounds-vectors-run.py param-bounds-meet-vectors-run.py resolve-vectors-run.py constraint-union-vectors-run.py authorize-chain-vectors-run.py
 
       - name: CLC-v1 vectors (verdict + reason)
         env:
@@ -34,6 +34,41 @@ jobs:
         env:
           CLC_PROPERTY_CASES: ../capability/data/_vectors/clc-v1/property-cases.json
         run: python3 property_test.py
+
+      - name: CLC-D containment vectors (contains + reason)
+        env:
+          CLC_D_VECTORS: ../capability/data/_vectors/clc-d/containment-vectors.json
+        run: python3 contains-vectors-run.py
+
+      - name: CLC-D forward-closure property
+        env:
+          CLC_D_PROPERTY_CASES: ../capability/data/_vectors/clc-d/containment-property-cases.json
+        run: python3 contain-property-run.py
+
+      - name: CLC-1.10 extended parameter bounds (verdict + reason)
+        env:
+          CLC_PARAM_BOUNDS_VECTORS: ../capability/data/_vectors/clc-v1/param-bounds-vectors.json
+        run: python3 param-bounds-vectors-run.py
+
+      - name: CLC-1.11 Resolve (verdict + reason + obligations)
+        env:
+          CLC_RESOLVE_VECTORS: ../capability/data/_vectors/clc-v1/resolve-vectors.json
+        run: python3 resolve-vectors-run.py
+
+      - name: CLC-1.12 ConstraintUnion (normalized union)
+        env:
+          CLC_CONSTRAINT_UNION_VECTORS: ../capability/data/_vectors/clc-v1/constraint-union-vectors.json
+        run: python3 constraint-union-vectors-run.py
+
+      - name: CLC-1.13 AuthorizeWithChain (fused chain check)
+        env:
+          CLC_AUTHORIZE_CHAIN_VECTORS: ../capability/data/_vectors/clc-d/authorize-chain-vectors.json
+        run: python3 authorize-chain-vectors-run.py
+
+      - name: CLC-1.14 BoundMeet (param_bounds intersection)
+        env:
+          CLC_PARAM_BOUNDS_MEET_VECTORS: ../capability/data/_vectors/clc-v1/param-bounds-meet-vectors.json
+        run: python3 param-bounds-meet-vectors-run.py
 
   ts:
     runs-on: ubuntu-latest
@@ -56,3 +91,38 @@ jobs:
         env:
           CLC_PROPERTY_CASES: ../capability/data/_vectors/clc-v1/property-cases.json
         run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/property.ts
+
+      - name: CLC-D containment vectors (contains + reason, TS)
+        env:
+          CLC_D_VECTORS: ../capability/data/_vectors/clc-d/containment-vectors.json
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/contains-vectors-run.ts
+
+      - name: CLC-D forward-closure property (TS)
+        env:
+          CLC_D_PROPERTY_CASES: ../capability/data/_vectors/clc-d/containment-property-cases.json
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/contain-property.ts
+
+      - name: CLC-1.10 extended parameter bounds (verdict + reason, TS)
+        env:
+          CLC_PARAM_BOUNDS_VECTORS: ../capability/data/_vectors/clc-v1/param-bounds-vectors.json
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/param-bounds-vectors-run.ts
+
+      - name: CLC-1.11 Resolve (verdict + reason + obligations, TS)
+        env:
+          CLC_RESOLVE_VECTORS: ../capability/data/_vectors/clc-v1/resolve-vectors.json
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/resolve-vectors-run.ts
+
+      - name: CLC-1.12 ConstraintUnion (normalized union, TS)
+        env:
+          CLC_CONSTRAINT_UNION_VECTORS: ../capability/data/_vectors/clc-v1/constraint-union-vectors.json
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/constraint-union-vectors-run.ts
+
+      - name: CLC-1.13 AuthorizeWithChain (fused chain check, TS)
+        env:
+          CLC_AUTHORIZE_CHAIN_VECTORS: ../capability/data/_vectors/clc-d/authorize-chain-vectors.json
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/authorize-chain-vectors-run.ts
+
+      - name: CLC-1.14 BoundMeet (param_bounds intersection, TS)
+        env:
+          CLC_PARAM_BOUNDS_MEET_VECTORS: ../capability/data/_vectors/clc-v1/param-bounds-meet-vectors.json
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/param-bounds-meet-vectors-run.ts
