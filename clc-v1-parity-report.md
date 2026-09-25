@@ -95,9 +95,9 @@ Kind counts are now syntax 9 / entail 47 / intersect 14 / decide 50 (120 total);
 
 CLC-1.15 landed as two scoped work items plus a cross-type comparison audit, all
 implemented across Go/Python/TypeScript and pinned in the corpus.  The cross-type comparison audit (Iman Schrock's review theme:
-"comparisons between different data types") ran a 47-case differential matrix
-(Go/Py/TS harnesses) on top of a per-source readthrough and found and fixed
-three residual divergences.
+"comparisons between different data types") prompted a cross-type audit
+across the three implementations plus a per-source readthrough, which found
+and fixed three residual divergences.
 
 - **Work item 1 — §8.4/§7.1 residual collation pinned to UTF-8 byte order.**  The
   TypeScript `unresolved`/obligations ordering used ECMAScript default sort,
@@ -149,12 +149,13 @@ three residual divergences.
   `invalid_params_null: <key>` (§5.2).  Python `intersect` now validates each
   source's params before merging, matching the other two.  Both deny; the
   reason code now agrees.
-- **Cross-type matrix made corpus-visible.**  The other infrastructure was
-  re-confirmed clean across 47 probes: enum membership with mixed
-  bool/number/string members, bound-subset numerics, `contains` params/enum
-  subset, `max_rows` non-numeric guard, step checks, nested key closure, 1 vs
-  1.0 numeric equality — all three implementations agree (remaining diffs are
-  runner formatting only: JSON spacing, reason-canonicalization prefix).
+- **Cross-type audit made corpus-visible.**  The reproducible pins are the
+  committed corpus vectors `intersect-011`/`-012`/`-013` and Go's
+  `TestIntersectCrossType`.  The additional per-source readthrough and parity
+  pass covered enum membership with mixed bool/number/string members,
+  bound-subset numerics, `contains` params/enum subset, `max_rows` guard,
+  step checks, nested key closure, and 1 vs 1.0 numeric equality; it found no
+  further divergence.
 
 Corpus: 120 → 123 (`intersect-011/-012/-013`).  Kind counts are now syntax 9 /
 entail 47 / intersect 17 / decide 50 (123 total); `property-cases.json` stays at
