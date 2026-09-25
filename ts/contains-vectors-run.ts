@@ -32,7 +32,9 @@ let passCount = 0;
 let failCount = 0;
 for (const v of vectors) {
     const r = contains(v.parent, v.child);
-    const gotContains = r.entails;
+    // No translation: contains() returns the §13.3 shape {contains, reason}
+    // (rev CLC-1.15), so the runner asserts on the relation's own fields.
+    const gotContains = r.contains;
     const gotReason = canonicalReason(r.reason ?? '');
     const wantReason = v.expect.reason ?? '';
     const ok = gotContains === v.expect.contains

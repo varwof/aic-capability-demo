@@ -134,7 +134,13 @@ RECOGNIZED_CONSTRAINT_IDENTITIES = {
 # shortcuts escape as two, every other control as `\u00xx` (six), and
 # `&`/`<`/`>`/U+2028/U+2029/non-ASCII stay raw — so the raw and decoded
 # limits agree; CLC-1.4/1.5 inputs still read.)
-CLC_REVISION = "CLC-1.14"
+# (rev CLC-1.15 · 2026-09-25: corrective — enum membership compares with JSON
+# type-sensitive equality (§6.5 layer 8), so Python's `True == 1` coercion no
+# longer leaks into `in`/`==` membership checks; the §6.6 cross-family
+# numeric × enum meet is refused (`invalid_params_binding`) in either order
+# instead of reducing to the filtered enum.  Inputs without param_bounds are
+# unaffected; CLC-1.14 and earlier inputs still read.)
+CLC_REVISION = "CLC-1.15"
 # §6.2 step 4: bounds on the JCS-serialized params form.
 MAX_PARAMS_SERIALIZED_BYTES = 512
 MAX_PARAMS_NESTING = 32
@@ -626,6 +632,48 @@ def has_empty_bound(params: dict) -> bool:
     return any(is_empty_bound(v) for v in params.values())
 
 
+def json_equal(a: Any, b: Any) -> bool:
+    """JSON type-sensitive equality (§6.2 enum rule / §6.5 layer 8, rev
+    CLC-1.15).
+
+    Two values are equal only when they have the same JSON type AND the same
+    value: `True` is neither `1` nor `0` (Python makes bool a subclass of int —
+    this helper is where that coercion MUST NOT leak into membership math), and
+    `"1"` is neither `1` nor `True`.  Numbers are compared after the §6.2
+    canonicalization — one IEEE-754 binary64 value rendered per ECMAScript
+    Number::toString — so `1` and `1.0` (one value, two spellings) ARE equal.
+    Lists and objects compare element-wise / member-wise with the same rule.
+    Used for enum membership (params arrays and param_bounds enums), the §6.6
+    enum intersection, the §7 params-value intersection and §13.4.3 enum
+    narrowing, so every membership decision in this module is type-sensitive
+    exactly like the Go (CanonicalJSON-bytes) and TypeScript (jsonEqual) cores.
+    """
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool) and a == b
+    if isinstance(a, (int, float)):
+        return (isinstance(b, (int, float)) and not isinstance(b, bool)
+                and float(a) == float(b))
+    if isinstance(a, str):
+        return isinstance(b, str) and a == b
+    if isinstance(a, list):
+        return (isinstance(b, list) and len(a) == len(b)
+                and all(json_equal(x, y) for x, y in zip(a, b)))
+    if isinstance(a, dict):
+        return (isinstance(b, dict) and a.keys() == b.keys()
+                and all(json_equal(a[k], b[k]) for k in a))
+    return a is None and b is None
+
+
+def _render_number(m: Any) -> Any:
+    """One JSON value, one spelling (§2.4 / §6.2, rev CLC-1.15): an integral
+    float and its int twin are the same IEEE-754 value and must serialize the
+    same way (Go/TS always render 1.0 as 1).  Applied to enum-meet and
+    params-intersect member outputs so the raw JSON matches their bytes."""
+    if isinstance(m, float) and m.is_integer():
+        return int(m)
+    return m
+
+
 def _bound_family(b: Any) -> str:
     """§6.6 Bound value family (or 'none' for an empty Bound)."""
     if not isinstance(b, dict):
@@ -640,9 +688,11 @@ def _bound_family(b: Any) -> str:
 
 
 def _canonical_enum_members(members: list) -> list:
-    """Dedupe enum members and order them by their JCS rendering (P11)."""
+    """Dedupe enum members and order them by their JCS rendering (P11).
+    Integral floats render as int (rev CLC-1.15, cross-type audit)."""
     seen = {}
     for m in members:
+        m = _render_number(m)
         try:
             k = canonical_json(m)
         except Exception:
@@ -711,12 +761,21 @@ def bound_meet(a: Any, b: Any) -> tuple[dict, str]:
         res, err = _enum_meet(am, bm)
     elif af == "nested" and bf == "nested":
         res, err = _nested_meet(am, bm)
-    elif af == "numeric" and bf == "enum":
-        res, err = _numeric_enum_meet(am, bm)
-    elif af == "enum" and bf == "numeric":
-        res, err = _numeric_enum_meet(bm, am)
+    elif (af == "numeric" and bf == "enum") or (af == "enum" and bf == "numeric"):
+        # rev CLC-1.15 §6.6: a cross-family numeric × enum meet has no sound
+        # representation — the CLC-1.14 filtered-enum result was broader than
+        # either source (it accepted array requests, e.g. [3], that the numeric
+        # side fail-closes at §6.5 layer 9).  Refused in either source order
+        # and regardless of whether any member falls inside the numeric range:
+        # the family clash is decided before any member or range math.
+        return {}, "invalid_params_binding"
     elif af == "nested" or bf == "nested":
-        return {}, "no_overlap"
+        # scalar (numeric/enum) ∩ object (nested), either order: refused like
+        # the numeric × enum pair — no single-family Bound can carry both the
+        # scalar side's shape constraint and the object recursion (§6.6 rev
+        # CLC-1.15; design-notes D12).  The family clash is decided before any
+        # member, range or key-set math.
+        return {}, "invalid_params_binding"
     else:
         return {}, "invalid_params_binding"
     if err:
@@ -756,14 +815,16 @@ def _enum_meet(a: dict, b: dict) -> tuple[dict, str]:
     res: dict = {}
     ae, be = a.get("enum"), b.get("enum")
     if isinstance(ae, list) and isinstance(be, list):
-        inter = [x for x in ae if x in be]
+        # rev CLC-1.15: the member sets intersect under JSON type-sensitive
+        # equality (§6.5 layer 8) — 1, True and "1" are distinct members.
+        inter = [x for x in ae if any(json_equal(x, y) for y in be)]
         if len(inter) == 0:
             return {}, "no_overlap"
         res["enum"] = _canonical_enum_members(inter)
     elif isinstance(ae, list):
-        res["enum"] = list(ae)
+        res["enum"] = [_render_number(x) for x in ae]
     elif isinstance(be, list):
-        res["enum"] = list(be)
+        res["enum"] = [_render_number(x) for x in be]
     mv, ok = _max_of(a.get("min_items"), b.get("min_items"))
     if ok:
         res["min_items"] = mv
@@ -772,33 +833,6 @@ def _enum_meet(a: dict, b: dict) -> tuple[dict, str]:
         res["max_items"] = mv
     if "min_items" in res and "max_items" in res and res["min_items"] > res["max_items"]:
         return {}, "no_overlap"
-    return res, ""
-
-
-def _numeric_enum_meet(num: dict, en: dict) -> tuple[dict, str]:
-    e = en.get("enum")
-    if not isinstance(e, list):
-        return {}, "invalid_params_binding"
-    filtered = []
-    for mem in e:
-        if not isinstance(mem, (int, float)) or isinstance(mem, bool):
-            continue
-        ok = True
-        if isinstance(num.get("min"), (int, float)) and mem < num["min"]:
-            ok = False
-        if isinstance(num.get("max"), (int, float)) and mem > num["max"]:
-            ok = False
-        if isinstance(num.get("step"), (int, float)) and not _is_multiple_of(mem, num["step"]):
-            ok = False
-        if ok:
-            filtered.append(mem)
-    if len(filtered) == 0:
-        return {}, "no_overlap"
-    res: dict = {"enum": _canonical_enum_members(filtered)}
-    if "min_items" in en:
-        res["min_items"] = en["min_items"]
-    if "max_items" in en:
-        res["max_items"] = en["max_items"]
     return res, ""
 
 
@@ -898,7 +932,9 @@ def value_subset(op_val: Any, grant_val: Any) -> tuple[bool, str]:
             return False, "empty_bound_denies_class"
         elems = op_val if isinstance(op_val, list) else [op_val]
         for o in elems:
-            if o not in grant_val:
+            # rev CLC-1.15: membership uses JSON type-sensitive equality
+            # (§6.5 layer 8), never Python's coercing `in`/`==` (True == 1).
+            if not any(json_equal(o, g) for g in grant_val):
                 return False, "not_in_enum"
         return True, ""
 
@@ -1056,7 +1092,10 @@ def bound_subset(op_val: Any, bound: Any) -> tuple[bool, str]:
             return False, "empty_bound_denies_class"
         elems = op_val if isinstance(op_val, list) else [op_val]
         for o in elems:
-            if o not in gv:
+            # rev CLC-1.15: JSON type-sensitive equality (§6.5 layer 8) —
+            # `True` is not a member of `[1]` and `1` is not a member of
+            # `[True]`, whatever Python's `==` coercion says.
+            if not any(json_equal(o, g) for g in gv):
                 return False, "not_in_enum"
     if "min_items" in bound or "max_items" in bound:
         card = len(op_val) if isinstance(op_val, list) else 1
@@ -1225,6 +1264,13 @@ def intersect(grants: list[dict]) -> dict:
     if params_keys & bounds_keys:
         raise InvalidParamsBinding("invalid_params_binding")
 
+    # Null values in any source's params are invalid in v1 (§5.2) — mirror
+    # Go's ValidateGrantParams / TS's validateParams (rev CLC-1.15, cross-type
+    # audit: previously a null met `intersect_value`'s fallback and surfaced
+    # a weaker no_overlap instead of invalid_params_null: <key>).
+    for g in grants:
+        validate_params(g.get("params"))
+
     result = grants[0].copy()
 
     for g in grants[1:]:
@@ -1304,7 +1350,9 @@ def intersect_value(a: Any, b: Any) -> tuple[Any, str]:
         return min(a, b), ""
 
     if isinstance(a, list) and isinstance(b, list):
-        result = [x for x in a if x in b]
+        # rev CLC-1.15: element intersection under JSON type-sensitive
+        # equality (§6.5 layer 8), matching Go's enumEqual / TS's jsonEqual.
+        result = [_render_number(x) for x in a if any(json_equal(x, y) for y in b)]
         if not result:
             return None, "no_overlap"
         return result, ""
@@ -1418,7 +1466,9 @@ def _bound_within(child: Any, parent: Any) -> Optional[str]:
         if "enum" not in child:
             return "params_not_narrower"
         for e in child["enum"]:
-            if e not in parent["enum"]:
+            # rev CLC-1.15: subset under JSON type-sensitive equality
+            # (§6.5 layer 8) — a child `true` is not inside a parent `[1]`.
+            if not any(json_equal(e, p) for p in parent["enum"]):
                 return "params_not_narrower"
     if "min_items" in parent:
         if "min_items" not in child or child["min_items"] < parent["min_items"]:

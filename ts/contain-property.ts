@@ -25,7 +25,7 @@ let opChecks = 0;
 let violations = 0;
 let raised = 0;
 for (const c of doc.cases) {
-    let r: { entails: boolean; reason?: string };
+    let r: { contains: boolean; reason?: string };
     try {
         r = contains(c.parent, c.child);
     } catch (e) {
@@ -33,11 +33,11 @@ for (const c of doc.cases) {
         console.log(`RAISED ${c.id}: ${String(e)}`);
         continue;
     }
-    if (r.entails) containedPairs++;
+    if (r.contains) containedPairs++;
     for (const o of doc.ops) {
         opChecks++;
         if (!entails(c.child, o).entails) continue;
-        if (r.entails && !entails(c.parent, o).entails) {
+        if (r.contains && !entails(c.parent, o).entails) {
             violations++;
             if (violations <= 5) {
                 console.log(`VIOLATION ${c.id} parent=${JSON.stringify(c.parent)} child=${JSON.stringify(c.child)} op=${JSON.stringify(o)}`);

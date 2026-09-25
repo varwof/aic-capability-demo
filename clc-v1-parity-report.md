@@ -1,12 +1,12 @@
 # CLC-v1 Parity Report
 
-Date: 2026-09-12 (rev 12: CLC-1.3 closeout — 105 vectors; `allow_unresolved` independent verdict, (scheme,type) constraint identity, same-day time-window grammar, `{}`≡absent params, §9.3 multi-grant aggregation; Go/Python/TS parity).  Latest: rev 14 (2026-09-16, CLC-1.8 closeout — corpus 114 → 120, see below).
+Date: 2026-09-12 (rev 12: CLC-1.3 closeout — 105 vectors; `allow_unresolved` independent verdict, (scheme,type) constraint identity, same-day time-window grammar, `{}`≡absent params, §9.3 multi-grant aggregation; Go/Python/TS parity).  Latest: rev 15 (2026-09-25, CLC-1.15 closeout — corpus 120 → 123 + cross-type comparison audit closed; see below).
 
 ## Summary
 
 > **Snapshot note**: this Summary and the Per-Kind Breakdown below are the
 > historical rev-12 tables; they do not reflect later corpus growth.  The
-> current state is rev 14 (120 vectors, 1184 property cases) — see the rev 14
+> current state is rev 15 (123 vectors, 1184 property cases) — see the rev 15
 > section below.
 
 | Metric | Value |
@@ -91,6 +91,80 @@ Kind counts are now syntax 9 / entail 47 / intersect 14 / decide 50 (120 total);
 `property-cases.json` stays at 1184.  The Go conformance runner reports
 `Total: 120 | Pass: 120 | Fail: 0`, and the Python/TS runners agree.
 
+## rev 15 Changes (2026-09-25) — CLC-1.15 closeout: collation pinning, scalar∩nested binding, cross-type comparison audit
+
+CLC-1.15 landed as two scoped work items plus a cross-type comparison audit, all
+implemented across Go/Python/TypeScript and pinned in the corpus.  The cross-type comparison audit (Iman Schrock's review theme:
+"comparisons between different data types") ran a 47-case differential matrix
+(Go/Py/TS harnesses) on top of a per-source readthrough and found and fixed
+three residual divergences.
+
+- **Work item 1 — §8.4/§7.1 residual collation pinned to UTF-8 byte order.**  The
+  TypeScript `unresolved`/obligations ordering used ECMAScript default sort,
+  which orders U+10A00 surrogate-pair strings differently from the
+  `capability-language-core` contract (§7.1 UTF-8 byte order); `.sort()` was
+  replaced with `.sort(utf8ByteCompare)`, the slice sharing the same comparator
+  (§8.4 pins §7.1's collation, resolving §8.4's only open semantic).  All
+  variant runners now assert the **exact manifest order** — no pre-sort masking —
+  for `unresolved` (§8.4), `constraints` (§7.1 ConstraintUnion) and
+  grant-array/evidence order.  Runners: Go `vectors-run`, Python `vectors-run`,
+  `resolve-vectors-run`, `authorize-chain-vectors-run`, TS `vectors-run`,
+  `resolve-vectors-run`, `authorize-chain-vectors-run` (Go resolve/chain runners
+  were already byte-exact via `slices.Equal`).  Honest boundary: no end-to-end
+  non-BMP unresolved vector is possible (recognized constraint value grammars
+  are ASCII-only), so the comparator is pinned by the non-BMP cases in
+  `constraint-union-collation-vectors.json` plus exact-order assertions.
+- **Work item 2 — scalar ∩ nested → `invalid_params_binding`.**  All three
+  `boundMeet`s changed their nested-family branch from `no_overlap` to
+  `invalid_params_binding`, closing the open scalar∩nested question left by
+  CLC-1.14 by adjudication: **every**
+  cross-family meet (numeric × nested, enum × nested, both directions, nested at
+  the top level or inside `nested`) is unrepresentable and refuses with
+  `invalid_params_binding`; `no_overlap` is now reserved for same-family empty
+  meets (`min>max`, disjoint enum).  `param-bounds-meet-vectors.json` updated
+  `bm-019` and pinned the re-adjudicated baseline-impacting pair
+  `bm-012`/`bm-013` (numeric × enum: allow under CLC-1.14's filtered-enum meet,
+  deny under CLC-1.15's single cross-family refusal); the
+  meet-property run stays at 186 successful meets as predicted.
+- **Audit finding 1 — Go `intersectValue` type-folding (fail-open), fixed.**  Two branches
+  (`register/semantics/semantics.go` list-branch and default scalar branch)
+  compared JSON values with `fmt.Sprintf("%v")`, which collapses types: `"1"`,
+  `true` and `"1.5"` were treated as equal to `1`, `1` and `1.5` respectively,
+  so two grants constraining one params key to a string vs a number/bool merged
+  into a **wider** grant instead of denying `no_overlap` (the fail-open
+  direction Iman flagged).  Python/TS were already type-sensitive (`json_equal` /
+  `jsonEqual`, confirmed by readthrough); Go was the only miss.  Both branches
+  now use `enumEqual` (CanonicalJSON bytes).  Pinned by `intersect-011`
+  (string × number scalar) and `intersect-012` (`[1]` × `["1"]` enum list);
+  `TestIntersectCrossType` covers the same in Go.
+- **Audit finding 2 — Python integral-float member rendering.**  `enum:[1.0] × [1]` produced
+  `[1.0]` in Python raw JSON but `[1]` in Go/TS (one IEEE-754 value, §2.4; JCS
+  renders both as `1`).  New `_render_number` (integral float → int) is applied
+  in `_canonical_enum_members`, the `boundMeet` single-side copies and the
+  `intersect_value` array branch.  Pinned by `intersect-013` (result_params
+  `{"x":[1]}`).
+- **Audit finding 3 — Python `intersect` null-params validation.**  `intersect_value`'s
+  fallback surfaced `no_overlap` for a `null` parameter where Go
+  (`ValidateGrantParams`) and TS (`validateParams`) report
+  `invalid_params_null: <key>` (§5.2).  Python `intersect` now validates each
+  source's params before merging, matching the other two.  Both deny; the
+  reason code now agrees.
+- **Cross-type matrix made corpus-visible.**  The other infrastructure was
+  re-confirmed clean across 47 probes: enum membership with mixed
+  bool/number/string members, bound-subset numerics, `contains` params/enum
+  subset, `max_rows` non-numeric guard, step checks, nested key closure, 1 vs
+  1.0 numeric equality — all three implementations agree (remaining diffs are
+  runner formatting only: JSON spacing, reason-canonicalization prefix).
+
+Corpus: 120 → 123 (`intersect-011/-012/-013`).  Kind counts are now syntax 9 /
+entail 47 / intersect 17 / decide 50 (123 total); `property-cases.json` stays at
+1184.  All runners report `Total: 123 | Pass: 123 | Fail: 0` (Go/Python/TS);
+`param-bounds-meet` 27/27, `param-bounds` 43/43, `resolve` 26/26,
+`constraint-union` 12/12, `contains` 64/64, chain 15/15; Python↔TypeScript
+parity byte-clean on vectors/meet/union/chain; property 1184 + contain 784 +
+meet-property 500·186·0 + edge + jcs all green; `go test ./... -count=1` green.
+Three implementations verdict/reason consistent on all 123 vectors.
+
 ## Per-Kind Breakdown
 
 Grouped by `kind` field (as in vectors.json):
@@ -143,11 +217,12 @@ produce (verified Go==Python and impl==vector):
 | `not_in_enum` | params-004,005,010,012,014, clinical-001, payments-001, combined-007 | value not a member of granted array set |
 | `empty_bound_denies_class` | params-007, intersect-002, combined-005,011 | explicitly empty `[]`/`{}` bound |
 | `invalid_params_null` | params-008, decide-008 | `null` parameter value; implementations MAY report `invalid_params_null: <param>` (matched via canonical prefix, §9.4) |
+| `invalid_params_binding` | param-bounds bm-012/013/019 | cross-family Bound meet is unrepresentable — scalar ∩ nested / enum ∩ nested in either direction refuses `invalid_params_binding`, not `no_overlap` (rev CLC-1.15, adjudication; `no_overlap` kept for same-family empty meets) |
 | `invalid_params_duplicate_key` | params-016 | duplicate JSON key in raw request params (§6.2 step 2, §9.3 layer 2) |
 | `invalid_params_number` | params-017 | non-finite / over-precision number literal (`1e400`) (§6.2 step 3) |
 | `invalid_params_size` | params-018, params-019 | >512 bytes or nesting >32 (§6.2 step 4) |
 | `unsupported_language_revision` | revision-002 | declared revision incompatible with implementation (§12.1; revision-001 asserts compatibility → allow) |
-| `no_overlap` | intersect-003,006, combined-008 | intersection result empty; dict intersection with **different key sets** → `no_overlap` (P11 key-set rule, rev CLC-1.2, pinned by the property wall) |
+| `no_overlap` | intersect-003,006,011,012, combined-008 | intersection result empty: same-family empty meets, dict intersection with **different key sets** (P11 key-set rule, rev CLC-1.2, pinned by the property wall), and **cross-type value intersection** — a string never intersects a number/bool with the same printed form, in scalars or enum-list elements (rev CLC-1.15 cross-type audit; Go's `fmt.Sprintf` folding removed) |
 | `absent_source` | intersect-007 | intersection over zero sources: fail-closed (§7 rule 5) |
 
 ## rev 11 Changes (2026-09-12) — CLC-1.2 Sweep

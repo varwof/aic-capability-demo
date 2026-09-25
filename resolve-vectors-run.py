@@ -32,7 +32,8 @@ def main():
         got_reason = canonical_reason(got.get("reason"))
         ok = got["verdict"] == v["expect"]["verdict"] and got_reason == exp_reason
         if ok and "unresolved" in v["expect"]:
-            ok = sorted(got.get("unresolved", [])) == sorted(v["expect"]["unresolved"])
+            # exact manifest order (UTF-8 byte sequence, §7.1/§8.4; CLC-1.15)
+            ok = got.get("unresolved", []) == v["expect"]["unresolved"]
         if ok:
             passed += 1
             status = "PASS"

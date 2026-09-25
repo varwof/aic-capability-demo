@@ -59,8 +59,10 @@ function checkResult(expect: Vector['expect'], got: Record<string, unknown>): st
         }
     }
     if ('result_constraints' in expect) {
-        const want = [...(((expect as Record<string, unknown>)['result_constraints'] as string[]) ?? [])].sort();
-        const have = [...((got.constraints as string[]) ?? [])].sort();
+        // §7.1 ConstraintUnion: assert the exact manifest order (UTF-8 byte
+        // sequence), no pre-sort (rev CLC-1.15).
+        const want = ((expect as Record<string, unknown>)['result_constraints'] as string[]) ?? [];
+        const have = (got.constraints as string[]) ?? [];
         if (JSON.stringify(want) !== JSON.stringify(have)) {
             return `result_constraints want=${JSON.stringify(want)} got=${JSON.stringify(have)}`;
         }
@@ -175,10 +177,11 @@ function runVector(v: Vector): Result {
         r.reason = canonicalReason(result.reason ?? '');
         r.pass = r.got === r.expect && r.reason === r.expReason;
         // §8.4 residual obligations: asserted when the vector declares them
-        // (rev CLC-1.2).  Both sides sorted+deduped before comparison.
+        // (rev CLC-1.15).  §8.4 residual obligations are asserted in the exact
+        // manifest order (UTF-8 byte sequence, §7.1), no pre-sort.
         if ('unresolved' in v.expect) {
-            const want = [...(v.expect.unresolved ?? [])].sort();
-            const have = [...(result.unresolved ?? [])].sort();
+            const want = v.expect.unresolved ?? [];
+            const have = result.unresolved ?? [];
             if (JSON.stringify(want) !== JSON.stringify(have)) {
                 r.note = `unresolved want=${JSON.stringify(want)} got=${JSON.stringify(have)}`;
                 r.pass = false;

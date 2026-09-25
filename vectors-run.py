@@ -38,8 +38,10 @@ def check_result(expect: dict, got: dict) -> str:
             return "result_params want=%s got=%s" % (
                 json.dumps(want, sort_keys=True), json.dumps(have, sort_keys=True))
     if "result_constraints" in expect:
-        want = sorted(expect["result_constraints"] or [])
-        have = sorted(got.get("constraints") or [])
+        # §7.1 ConstraintUnion: the corpus asserts the exact manifest order
+        # (UTF-8 byte sequence), so no pre-sort here (rev CLC-1.15).
+        want = expect["result_constraints"] or []
+        have = got.get("constraints") or []
         if want != have:
             return "result_constraints want=%s got=%s" % (want, have)
     return ""
@@ -134,12 +136,13 @@ def run_vector(v: dict) -> dict:
             result = authorize(grant, op)
         r["got"] = result["verdict"]
         r["reason"] = canonical_reason(result.get("reason", ""))
-        # §8.4 residual obligations: asserted when the vector declares them
-        # (rev CLC-1.2).  Both sides sorted+deduped before comparison.
+        # §8.4 residual obligations: asserted when the vector declares them.
+        # The corpus asserts the exact manifest order (UTF-8 byte sequence,
+        # §7.1), so no pre-sort here (rev CLC-1.15).
         r["pass"] = r["got"] == r["expect"] and r["reason"] == r["exp_reason"]
         if "unresolved" in expect:
-            want = sorted(expect["unresolved"] or [])
-            have = sorted(result.get("unresolved") or [])
+            want = expect["unresolved"] or []
+            have = result.get("unresolved") or []
             if want != have:
                 note = f"unresolved want={want} got={have}"
                 r["note"] = note

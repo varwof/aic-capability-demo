@@ -46,6 +46,16 @@ export interface MatchResult {
     reason?: string;
 }
 
+// ContainmentResult is the §13.3 return shape of contains() — the JSON object
+// {contains, reason}.  Rev CLC-1.15: the public surface no longer reuses the
+// entailment's MatchResult{entails}, so a caller reads the §13.3 field names
+// directly and no runner needs a translation layer.  `reason` is empty on
+// success and carries the first failing layer's code on failure.
+export interface ContainmentResult {
+    contains: boolean;
+    reason?: string;
+}
+
 // A fail-closed evaluation error.  The message is the reason string and MAY
 // carry a ": <detail>" diagnostic suffix (§9.4).
 export class SemanticsError extends Error {
@@ -82,7 +92,13 @@ export const RECOGNIZED_CONSTRAINT_IDENTITIES = new Set(
 // shortcuts escape as two, every other control as `\u00xx` (six), and
 // `&`/`<`/`>`/U+2028/U+2029/non-ASCII stay raw — and includes both string
 // quotes, so the raw and decoded limits agree; CLC-1.4/1.5 inputs still read.)
-export const CLC_REVISION = 'CLC-1.14';
+// (rev CLC-1.15 · 2026-09-25: corrective — the §6.6 cross-family numeric ×
+// enum meet is refused (invalid_params_binding) in either order instead of
+// reducing to the filtered enum; ConstraintUnion sorts in UTF-8 byte order
+// (§7.1); contains() returns the §13.3 {contains, reason} shape.  Inputs
+// without param_bounds are unaffected; CLC-1.14 and earlier inputs still
+// read.)
+export const CLC_REVISION = 'CLC-1.15';
 // §6.2 step 4: bounds on the JCS-serialized params form.
 export const MAX_PARAMS_SERIALIZED_BYTES = 512;
 export const MAX_PARAMS_NESTING = 32;
@@ -1200,39 +1216,6 @@ function enumMeet(a: Record<string, unknown>, b: Record<string, unknown>): [Reco
     return [res, ''];
 }
 
-function numericEnumMeet(num: Record<string, unknown>, en: Record<string, unknown>): [Record<string, unknown>, string] {
-    const e = en['enum'];
-    if (!Array.isArray(e)) {
-        return [{}, 'invalid_params_binding'];
-    }
-    const filtered = e.filter((mem) => {
-        if (!isNumber(mem)) {
-            return false;
-        }
-        if (isNumber(num['min']) && mem < (num['min'] as number)) {
-            return false;
-        }
-        if (isNumber(num['max']) && mem > (num['max'] as number)) {
-            return false;
-        }
-        if (isNumber(num['step']) && !isMultipleOf(mem, num['step'] as number)) {
-            return false;
-        }
-        return true;
-    });
-    if (filtered.length === 0) {
-        return [{}, 'no_overlap'];
-    }
-    const res: Record<string, unknown> = { enum: canonicalEnumMembers(filtered) };
-    if ('min_items' in en) {
-        res['min_items'] = en['min_items'];
-    }
-    if ('max_items' in en) {
-        res['max_items'] = en['max_items'];
-    }
-    return [res, ''];
-}
-
 function nestedMeet(a: Record<string, unknown>, b: Record<string, unknown>): [Record<string, unknown>, string] {
     const an = a['nested'];
     const bn = b['nested'];
@@ -1274,12 +1257,21 @@ function boundMeet(a: unknown, b: unknown): [Record<string, unknown>, string] {
         [res, err] = enumMeet(a, b);
     } else if (af === 'nested' && bf === 'nested') {
         [res, err] = nestedMeet(a, b);
-    } else if (af === 'numeric' && bf === 'enum') {
-        [res, err] = numericEnumMeet(a, b);
-    } else if (af === 'enum' && bf === 'numeric') {
-        [res, err] = numericEnumMeet(b, a);
+    } else if ((af === 'numeric' && bf === 'enum') || (af === 'enum' && bf === 'numeric')) {
+        // rev CLC-1.15 §6.6: a cross-family numeric × enum meet has no sound
+        // representation — the CLC-1.14 filtered-enum result was broader than
+        // either source (it accepted array requests, e.g. [3], that the numeric
+        // side fail-closes at §6.5 layer 9).  Refused in either source order
+        // and regardless of whether any member falls inside the numeric range:
+        // the family clash is decided before any member or range math.
+        return [{}, 'invalid_params_binding'];
     } else if (af === 'nested' || bf === 'nested') {
-        return [{}, 'no_overlap'];
+        // scalar (numeric/enum) ∩ object (nested), either order: refused like
+        // the numeric × enum pair — no single-family Bound can carry both the
+        // scalar side's shape constraint and the object recursion (§6.6 rev
+        // CLC-1.15; design-notes D12).  The family clash is decided before any
+        // member, range or key-set math.
+        return [{}, 'invalid_params_binding'];
     } else {
         return [{}, 'invalid_params_binding'];
     }
@@ -1608,7 +1600,9 @@ export function entails(grant: Grant, op: Operation): MatchResult {
 //
 // The relation is compared on DECLARED sets and DECLARED bounds, not on
 // behavior (CLC-v1 §12 keeps that scope).  If any layer of §4 fails,
-// Contains is false with the first failing layer's reason code.  Layer
+// Contains is false with the first failing layer's reason code.  The return
+// is the §13.3 ContainmentResult shape {contains, reason} (rev CLC-1.15) —
+// the same field names the relation signature defines.  Layer
 // semantics match the extension draft:
 //   - layer 1: both grants valid (identifier + params grammar);
 //   - layer 2: child id covered by parent id via CLC-v1 path coverage;
@@ -1620,25 +1614,25 @@ export function entails(grant: Grant, op: Operation): MatchResult {
 // (see intersect, §7), not by subset: a child's constraint set is never
 // compared to its parent's here.  Delegation mode is likewise a carrier
 // concept (AIC-JWT DA binds it); the language relation takes no mode.
-export function contains(parent: Grant, child: Grant): MatchResult {
+export function contains(parent: Grant, child: Grant): ContainmentResult {
     // Layer 1: grant validity — fail-closed on either side.  The reason is a
     // valid CLC-A code (invalid_capability_id, invalid_params_*).
     for (const g of [parent, child]) {
         try {
             validateCapabilityId(g.id);
         } catch (e) {
-            return { entails: false, reason: (e as SemanticsError).message };
+            return { contains: false, reason: (e as SemanticsError).message };
         }
         if (g.params != null) {
             try {
                 validateParams(g.params);
             } catch (e) {
-                return { entails: false, reason: (e as SemanticsError).message };
+                return { contains: false, reason: (e as SemanticsError).message };
             }
         }
         const bindReason = validateParamBounds(g.param_bounds, g.params);
         if (bindReason) {
-            return { entails: false, reason: bindReason };
+            return { contains: false, reason: bindReason };
         }
     }
 
@@ -1649,9 +1643,9 @@ export function contains(parent: Grant, child: Grant): MatchResult {
     const [okId, idReason] = matchId(parent.id, child.id);
     if (!okId) {
         if (idReason === 'different_namespace') {
-            return { entails: false, reason: idReason };
+            return { contains: false, reason: idReason };
         }
-        return { entails: false, reason: 'child_exceeds_parent' };
+        return { contains: false, reason: 'child_exceeds_parent' };
     }
 
     // Layer 3: parameter narrowing.
@@ -1668,7 +1662,7 @@ export function contains(parent: Grant, child: Grant): MatchResult {
     } else if (cpEmpty && cbnEmpty) {
         // Child unconstrained under a bounded parent: declaring nothing is
         // not "a subset of the parent's bounds" (§4.3 extra rule).
-        return { entails: false, reason: 'params_not_narrower' };
+        return { contains: false, reason: 'params_not_narrower' };
     } else {
         const parentParams = (pp ?? {}) as Record<string, unknown>;
         const childParams = (cp ?? {}) as Record<string, unknown>;
@@ -1678,35 +1672,35 @@ export function contains(parent: Grant, child: Grant): MatchResult {
             if (!(k in childParams)) {
                 // Child omits the key, or declares it in the other
                 // representation (§6.5 binding rule).
-                return { entails: false, reason: 'params_not_narrower' };
+                return { contains: false, reason: 'params_not_narrower' };
             }
             if (containsWithin(childParams[k], parentParams[k]) != null) {
-                return { entails: false, reason: 'params_not_narrower' };
+                return { contains: false, reason: 'params_not_narrower' };
             }
         }
         for (const k of Object.keys(parentBounds)) {
             if (!(k in childBounds)) {
-                return { entails: false, reason: 'params_not_narrower' };
+                return { contains: false, reason: 'params_not_narrower' };
             }
             if (boundWithin(childBounds[k], parentBounds[k]) != null) {
-                return { entails: false, reason: 'params_not_narrower' };
+                return { contains: false, reason: 'params_not_narrower' };
             }
         }
         // Key closure is symmetric: a child that adds a key the parent does
         // not declare allows operations the parent denies (undeclared_param).
         for (const k of Object.keys(childParams)) {
             if (!(k in parentParams)) {
-                return { entails: false, reason: 'params_not_narrower' };
+                return { contains: false, reason: 'params_not_narrower' };
             }
         }
         for (const k of Object.keys(childBounds)) {
             if (!(k in parentBounds)) {
-                return { entails: false, reason: 'params_not_narrower' };
+                return { contains: false, reason: 'params_not_narrower' };
             }
         }
     }
 
-    return { entails: true };
+    return { contains: true, reason: '' };
 }
 
 // containsWithin reports whether a child declared value is within a parent
@@ -2270,7 +2264,7 @@ export function authorizeSet(
         }
         return { verdict: VERDICT_DENY, reason: 'capability_not_authorized' };
     }
-    const uniq = [...new Set(unresolved)].sort();
+    const uniq = [...new Set(unresolved)].sort(utf8ByteCompare);
     if (uniq.length > 0) {
         return { verdict: VERDICT_ALLOW_UNRESOLVED, unresolved: uniq };
     }
@@ -2378,7 +2372,7 @@ export function resolve(
     }
 
     // Rules 3-5: status per obligation, most-restrictive-first.
-    const obligations = [...new Set(decision.unresolved ?? [])].sort();
+    const obligations = [...new Set(decision.unresolved ?? [])].sort(utf8ByteCompare);
     const remainder: string[] = [];
     for (const o of obligations) {
         let status: 'satisfied' | 'violated' | 'unknown' = 'unknown';
@@ -2409,12 +2403,31 @@ export function resolve(
     return { verdict: VERDICT_ALLOW_UNRESOLVED, unresolved: remainder };
 }
 
+// utf8ByteCompare orders two strings by their UTF-8 encodings, octet by
+// octet (§7.1, rev CLC-1.15).  JavaScript's default `<`/`sort()` compares
+// UTF-16 code units, which places supplementary-plane characters (surrogate
+// pairs, first unit U+D800–U+DBFF) BEFORE U+E000–U+FFFF characters although
+// their code points are higher; UTF-8 octet order equals code-point order for
+// well-formed text and is the collation all three implementations share.
+const utf8Encoder = new TextEncoder();
+function utf8ByteCompare(a: string, b: string): number {
+    const ba = utf8Encoder.encode(a);
+    const bb = utf8Encoder.encode(b);
+    const n = Math.min(ba.length, bb.length);
+    for (let i = 0; i < n; i++) {
+        if (ba[i] !== bb[i]) {
+            return ba[i] - bb[i];
+        }
+    }
+    return ba.length - bb.length;
+}
+
 // constraintUnion is the derived chain-constraint projection (§7.1, rev
 // CLC-1.12): the normalized union of every constraint string carried by the
-// grants in chain — duplicates folded, lexically sorted.  A projection, not a
-// meet: it compares no identifiers or params, reads no constraint values and
-// checks no containment.  An empty chain fails closed with absent_source
-// (§7 rule 5).
+// grants in chain — duplicates folded, sorted in UTF-8 byte order (rev
+// CLC-1.15 pins the collation).  A projection, not a meet: it compares no
+// identifiers or params, reads no constraint values and checks no
+// containment.  An empty chain fails closed with absent_source (§7 rule 5).
 export function constraintUnion(chain: Grant[]): string[] {
     if (chain.length === 0) {
         throw new SemanticsError('absent_source');
@@ -2425,7 +2438,7 @@ export function constraintUnion(chain: Grant[]): string[] {
             out.add(c);
         }
     }
-    return [...out].sort();
+    return [...out].sort(utf8ByteCompare);
 }
 
 // authorizeWithChain is the fused chain check (§13.11, rev CLC-1.13, CLC-D):
@@ -2443,7 +2456,7 @@ export function authorizeWithChain(chain: Grant[], op: Operation): Decision {
     }
     for (let i = 0; i + 1 < chain.length; i++) {
         const r = contains(chain[i], chain[i + 1]);
-        if (!r.entails) {
+        if (!r.contains) {
             return { verdict: VERDICT_DENY, reason: r.reason ?? 'child_exceeds_parent' };
         }
     }

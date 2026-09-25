@@ -24,8 +24,9 @@ for (const v of vectors) {
     const wantReason = canonicalReason(v.expect.reason);
     let ok = got.verdict === v.expect.verdict && gotReason === wantReason;
     if (ok && v.expect.unresolved !== undefined) {
-        const gotU = [...(got.unresolved ?? [])].sort();
-        const wantU = [...v.expect.unresolved].sort();
+        // exact manifest order (UTF-8 byte sequence, §7.1/§8.4; CLC-1.15)
+        const gotU = [...(got.unresolved ?? [])];
+        const wantU = [...v.expect.unresolved];
         ok = gotU.length === wantU.length && gotU.every((x, i) => x === wantU[i]);
     }
     if (ok) pass++;
