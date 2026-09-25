@@ -138,16 +138,19 @@ python3 jcs_check.py && node --experimental-strip-types ts/jcs_check.ts
 ```
 
 Corpora (in `varwof/capability`, `data/_vectors/clc-v1/`): `vectors.json`
-(107 authorization vectors, incl. the rev CLC-1.3 `allow_unresolved` verdict
-and §9.3 multi-grant aggregation), `evidence-vectors.json` (32),
+(the CLC-A authorization vectors, incl. the rev CLC-1.3 `allow_unresolved`
+verdict and §9.1 multi-grant aggregation; 123 vectors as of rev CLC-1.15 —
+the capability repository README carries the authoritative count),
+`evidence-vectors.json` (32),
 `crosswalk-vectors.json` (13), `property-cases.json` (1184 deterministic P11
 cases), `offline-vectors.json` (OCMP reference cases).
 
-Why three: a language is only as strong as the agreement between independent
-interpreters, and the three disagreed on real inputs until 2026-09-11 — the Go
-and Python implementations each violated a rule the TypeScript one already
-followed (boolean-exactness, layer-6-before-layer-7, layer-1 code
-propagation).  The parity record is in `clc-v1-parity-report.md`; the CI in
+Why three: a language is only as strong as the agreement between its
+interpreters.  These three share an author, so their parity is a regression
+test of the specification, not independent validation (§12, principle P12) —
+and even so they disagreed on real inputs until 2026-09-11: the Go and Python
+implementations each violated a rule the TypeScript one already followed
+(boolean-exactness, layer-6-before-layer-7, layer-1 code propagation).  The parity record is in `clc-v1-parity-report.md`; the CI in
 `.github/workflows/clc-conformance.yml` clones `varwof/capability` and runs
 `py_compile`, the vectors and the property suite on every push and PR.
 
