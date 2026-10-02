@@ -1,12 +1,14 @@
 // Edge-case checks a JSON corpus cannot carry (rev CLC-1.4): JSON cannot
 // represent non-finite numbers, so "a value no bound check can compare must
 // not become an allow" is pinned here.  Run: node --experimental-strip-types ts/edge_test.ts
-import { authorize, validateRawParams } from './clc_semantics.ts';
+import { authorize, validateConstraint, validateParams, validateRawParams } from './clc_semantics.ts';
 
 const GID = 'std/database-v1:query:SELECT';
 const fails: string[] = [];
+let COUNT = 0;
 
 function check(label: string, got: unknown, want: unknown): void {
+    COUNT++;
     if (got !== want) {
         fails.push(`${label}: got ${String(got)}, want ${String(want)}`);
     }
@@ -75,8 +77,88 @@ for (const [label, raw, want] of rawCases) {
     }
 }
 
+// The I-JSON integer bound (rev CLC-1.16 §6.2 step 3, [RFC7493] §6): an
+// integer-valued number past 2^53 - 1 has no exact binary64 representation, so
+// accepting it would decide `op <= grant` on a value the sender never wrote.
+// Every spelling of an over-bound integer is refused, while a genuine fraction
+// below the bound is not an integer and still reads.  The raw path is the only
+// entry that can see the literal text — 2^53 + 1 arrives already rounded — but
+// the bound must hold at both entries.
+const ijsonCases: Array<[string, string, string | null]> = [
+    ['at bound 2^53-1', '{"n":9007199254740991}', null],
+    ['2^53-1 minus a half', '{"n":9007199254740990.5}', null],
+    ['2^53 over', '{"n":9007199254740992}', 'invalid_params_number'],
+    ['2^53+1 over', '{"n":9007199254740993}', 'invalid_params_number'],
+    ['2^53+1 negative over', '{"n":-9007199254740993}', 'invalid_params_number'],
+    ['2^53+1 fraction spelling', '{"n":9007199254740993.0}', 'invalid_params_number'],
+    ['2^53+1 exponent spelling', '{"n":9.007199254740993e15}', 'invalid_params_number'],
+    ['2^53+1 negative exponent spelling', '{"n":-9.007199254740993e15}', 'invalid_params_number'],
+    ['20-digit over', '{"n":100000000000000000000}', 'invalid_params_number'],
+    ['over behind a small exponent', '{"n":9.007199254740993e16}', 'invalid_params_number'],
+    ['fraction below bound', '{"n":1.5}', null],
+    ['negative fraction', '{"n":-0.25}', null],
+    ['zero', '{"n":0}', null],
+    ['one', '{"n":1}', null],
+    // §6.2 step 8: String.trim() lists U+FEFF among its whitespace characters,
+    // so without an explicit refusal this host would drop a leading BOM and
+    // accept the payload — the ECMAScript-trim divergence the step closes.
+    ['leading BOM refused', '\uFEFF{"s":1}', 'invalid_params_number'],
+    ['leading BOM outranks the size cap', '\uFEFF' + '{"s":"' + 'a'.repeat(600) + '"}', 'invalid_params_number'],
+];
+for (const [label, raw, want] of ijsonCases) {
+    try {
+        validateRawParams(raw);
+        check(`raw ${label}`, null, want);
+    } catch (e: unknown) {
+        const reason = `${(e as Error).message ?? ''}`.split(':')[0];
+        check(`raw ${label}`, reason, want);
+    }
+}
+
+// The decoded entry point must refuse the same values as the raw path, including
+// inside a list, so a caller handing over an already-decoded params object cannot
+// carry an integer the raw text would have refused.
+const decodedCases: Array<[string, unknown, string | null]> = [
+    ['at bound', { n: 9007199254740991 }, null],
+    ['2^53+1 over', { n: 9007199254740993 }, 'invalid_params_number'],
+    ['fraction', { n: 1.5 }, null],
+    ['over inside a list', { n: [9007199254740993] }, 'invalid_params_number'],
+];
+for (const [label, value, want] of decodedCases) {
+    try {
+        validateParams(value as Record<string, unknown>);
+        check(`decoded ${label}`, null, want);
+    } catch (e: unknown) {
+        const reason = `${(e as Error).message ?? ''}`.split(':')[0];
+        check(`decoded ${label}`, reason, want);
+    }
+}
+
+// §8.1 states the max_rows constraint operand is not exempt from layer-7 closure:
+// an over-bound ceiling would be rounded before the "op <= grant" comparison.  The
+// reason code is the §8.1 one (invalid_constraint), not the params one.
+const constraintBoundCases: Array<[string, string, string | null]> = [
+    ['at bound', 'varwof/constraint-v1:max_rows:9007199254740991', null],
+    ['zero', 'varwof/constraint-v1:max_rows:0', null],
+    ['ordinary', 'varwof/constraint-v1:max_rows:1000', null],
+    ['2^53 over', 'varwof/constraint-v1:max_rows:9007199254740992', 'invalid_constraint'],
+    ['2^53+1 over', 'varwof/constraint-v1:max_rows:9007199254740993', 'invalid_constraint'],
+    ['20-digit over', 'varwof/constraint-v1:max_rows:100000000000000000000', 'invalid_constraint'],
+    ['not an integer', 'varwof/constraint-v1:max_rows:10.5', 'invalid_constraint'],
+    ['unknown scheme', 'foo/db-v1:max_rows:9007199254740993', 'unknown_constraint'],
+];
+for (const [label, c, want] of constraintBoundCases) {
+    try {
+        validateConstraint(c);
+        check(`constraint ${label}`, null, want);
+    } catch (e: unknown) {
+        const reason = `${(e as Error).message ?? ''}`.split(':')[0];
+        check(`constraint ${label}`, reason, want);
+    }
+}
+
 if (fails.length > 0) {
     console.error(fails.join('\n'));
     process.exit(1);
 }
-console.log('edge_test: 15 checks passed (non-finite, malformed Unicode, raw JCS-size boundary)');
+console.log(`edge_test: ${COUNT} checks passed (non-finite, malformed Unicode, raw JCS-size boundary, I-JSON integer bound in params and constraints)`);

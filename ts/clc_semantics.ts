@@ -98,7 +98,7 @@ export const RECOGNIZED_CONSTRAINT_IDENTITIES = new Set(
 // (§7.1); contains() returns the §13.3 {contains, reason} shape.  Inputs
 // without param_bounds are unaffected; CLC-1.14 and earlier inputs still
 // read.)
-export const CLC_REVISION = 'CLC-1.15';
+export const CLC_REVISION = 'CLC-1.16';
 // §6.2 step 4: bounds on the JCS-serialized params form.
 export const MAX_PARAMS_SERIALIZED_BYTES = 512;
 export const MAX_PARAMS_NESTING = 32;
@@ -191,9 +191,20 @@ export function validateCapabilityId(id?: string | null): void {
 // (sorted-key, compact) serialization.  Caps resolve before the null check
 // (layer order).  The offending key is carried as a ": <detail>" suffix
 // (§9.4).
+// rejectNonFinite also refuses an integer past the I-JSON bound
+// (rev CLC-1.16 §6.2 step 3).  The decoded entry cannot recover the literal the
+// sender wrote — JSON.parse has already rounded 9007199254740993 to
+// 9007199254740992 — but the magnitude it did produce is still above the bound,
+// which is the refusal the raw path would have made.  A genuine fraction below
+// the bound is not an integer and still reads.
 function rejectNonFinite(value: unknown): void {
-    if (typeof value === 'number' && !Number.isFinite(value)) {
-        throw new SemanticsError('invalid_params_number');
+    if (typeof value === 'number') {
+        if (!Number.isFinite(value)) {
+            throw new SemanticsError('invalid_params_number');
+        }
+        if (Number.isInteger(value) && Math.abs(value) > IJSON_MAX_INTEGER) {
+            throw new SemanticsError('invalid_params_number');
+        }
     }
     if (Array.isArray(value)) { value.forEach(rejectNonFinite); }
     else if (isPlainObject(value)) { Object.values(value).forEach(rejectNonFinite); }
@@ -302,14 +313,64 @@ export function significantDigits(lit: string): number {
 
 const NUMERIC_LITERAL_RE = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$/;
 
-// checkParamsNumber rejects non-finite or over-precision numeric params
-// (§6.2 step 3).
+// IJSON_MAX_INTEGER is the largest integer magnitude binary64 represents
+// exactly (2^53 - 1).  I-JSON [RFC7493] §6 names this range as interoperable.
+const IJSON_MAX_INTEGER = 9007199254740991n;
+
+// NUMBER_LITERAL_PARTS_RE is NUMERIC_LITERAL_RE with the parts captured, so the
+// I-JSON bound below can read a literal's exact decimal text.
+const NUMBER_LITERAL_PARTS_RE =
+    /^(-?)(0|[1-9][0-9]*)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?$/;
+
+// exceedsIJSONIntegerBound reports whether lit is an integer-valued JSON number
+// whose magnitude exceeds 2^53 - 1.  Such a value has no exact binary64
+// representation, so accepting it would round the operand and decide `op <= grant`
+// on a value the sender never wrote.  The literal is read as exact decimal text —
+// this host has only binary64 numbers, so the arithmetic runs in BigInt — and a
+// value written with a fraction or an exponent ("1.0", "9.007199254740993e15")
+// is still recognized as integer-valued.
+function exceedsIJSONIntegerBound(lit: string): boolean {
+    const m = NUMBER_LITERAL_PARTS_RE.exec(lit);
+    if (m === null) {
+        return false;
+    }
+    // value = ±digits × 10^scale, the fraction folded into the exponent.
+    const frac = m[3] === undefined ? '' : m[3];
+    const scale = (m[4] === undefined ? 0 : parseInt(m[4], 10)) - frac.length;
+    const digits = (m[2] + frac).replace(/^0+(?=[0-9])/, '');
+
+    if (scale >= 0) {
+        // An integer.  |value| ≥ 10^scale, and 10^16 already passes the limit, so
+        // a large scale is decided without exponentiating — that also keeps a
+        // pathological "1e999999999" cheap instead of building a giant BigInt.
+        if (BigInt(digits) === 0n) {
+            return false;
+        }
+        return scale >= 16 || BigInt(digits) * 10n ** BigInt(scale) > IJSON_MAX_INTEGER;
+    }
+    // A negative scale is integer-valued only when the dropped tail is all zeros:
+    // "2.0" is the integer 2, "1.5" is not an integer at all.
+    const drop = -scale;
+    if (drop >= digits.length) {
+        return false;
+    }
+    if (!/^0+$/.test(digits.slice(digits.length - drop))) {
+        return false;
+    }
+    return BigInt(digits.slice(0, digits.length - drop)) > IJSON_MAX_INTEGER;
+}
+
+// checkParamsNumber rejects non-finite, out-of-I-JSON-range or over-precision
+// numeric params (§6.2 step 3).
 function checkParamsNumber(lit: string): void {
     if (!NUMERIC_LITERAL_RE.test(lit)) {
         throw new SemanticsError(`invalid_params_number: ${lit}`);
     }
     const f = parseFloat(lit);
     if (!Number.isFinite(f)) {
+        throw new SemanticsError(`invalid_params_number: ${lit}`);
+    }
+    if (exceedsIJSONIntegerBound(lit)) {
         throw new SemanticsError(`invalid_params_number: ${lit}`);
     }
     if (significantDigits(lit) > 17) {
@@ -331,6 +392,16 @@ function checkParamsNumber(lit: string): void {
 // reverse of the spec.  Pass 1 computes size and depth only; pass 2 enforces the
 // rest.  Depth is still checked inline (it is part of check 4).
 function scanRawParams(raw: string, strict: boolean): { value: unknown; compact: number; depth: number } {
+    // §6.2 step 8: a leading UTF-8 BOM is refused.  RFC 8259 §8.1 lets a
+    // recipient ignore it; CLC MUST NOT, because this host's String.trim()
+    // lists U+FEFF among its whitespace characters and would drop it silently —
+    // the ECMAScript-trim divergence this step closes.  The check sits on the
+    // untrimmed text and runs on both passes, ahead of the size and depth caps:
+    // a BOM makes the text not an object whatever its length, so it outranks
+    // invalid_params_size the way the other two ports already report it.
+    if (raw.charCodeAt(0) === 0xfeff) {
+        throw new SemanticsError('invalid_params_number');
+    }
     let t = raw.trim();
     if (t === '' || !t.startsWith('{')) {
         throw new SemanticsError('invalid_params_number');
@@ -1873,8 +1944,11 @@ export function validateConstraint(c: string): void {
     switch (parts[1]) {
         case 'max_rows':
             // Strict JSON non-negative integer, exactly one token (§8.1
-            // value-grammar table).
-            if (parts.length !== 3 || !isStrictJSONInteger(parts[2])) {
+            // value-grammar table), and inside the I-JSON range: the operand is
+            // not exempt from layer-7 closure, so an over-bound ceiling would
+            // be rounded before the "op <= grant" comparison.
+            if (parts.length !== 3 || !isStrictJSONInteger(parts[2])
+                || exceedsIJSONIntegerBound(parts[2])) {
                 throw new SemanticsError(`invalid_constraint: ${c}`);
             }
             break;

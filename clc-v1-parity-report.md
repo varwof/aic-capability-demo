@@ -1,12 +1,12 @@
 # CLC-v1 Parity Report
 
-Date: 2026-09-12 (rev 12: CLC-1.3 closeout — 105 vectors; `allow_unresolved` independent verdict, (scheme,type) constraint identity, same-day time-window grammar, `{}`≡absent params, §9.3 multi-grant aggregation; Go/Python/TS parity).  Latest: rev 15 (2026-09-25, CLC-1.15 closeout — corpus 120 → 123 + cross-type comparison audit closed; see below).
+Date: 2026-09-12 (rev 12: CLC-1.3 closeout — 105 vectors; `allow_unresolved` independent verdict, (scheme,type) constraint identity, same-day time-window grammar, `{}`≡absent params, §9.3 multi-grant aggregation; Go/Python/TS parity).  Latest: rev 16 (2026-10-02, CLC-1.16 closeout — corpus 136 → 146 with the I-JSON integer bound and leading-BOM pins; Java and .NET brought onto the same revision; see below).  Prior: rev 15 (2026-09-25, CLC-1.15 closeout — corpus 120 → 123 + cross-type comparison audit closed).
 
 ## Summary
 
 > **Snapshot note**: this Summary and the Per-Kind Breakdown below are the
 > historical rev-12 tables; they do not reflect later corpus growth.  The
-> current state is rev 15 (123 vectors, 1184 property cases) — see the rev 15
+> current state is rev 16 (146 vectors, 1184 property cases) — see the rev 16
 > section below.
 
 | Metric | Value |
@@ -165,6 +165,66 @@ entail 47 / intersect 17 / decide 50 (123 total); `property-cases.json` stays at
 parity byte-clean on vectors/meet/union/chain; property 1184 + contain 784 +
 meet-property 500·186·0 + edge + jcs all green; `go test ./... -count=1` green.
 Three implementations verdict/reason consistent on all 123 vectors.
+
+## rev 16 Changes (2026-10-02) — CLC-1.16 closeout: input-boundary pins, five ports on one revision
+
+The CLC-1.16 input-boundary rules arrived in the specification before the corpus
+had machine-readable pins for them: the revision history deferred them, and the
+only coverage was per-port edge tests, which cannot cross-check each other.  This
+round closes that.
+
+**Corpus.** `params-053`–`params-062` (10 vectors, kind=entail, tagged CLC-1.16)
+pin the I-JSON integer bound and the leading-BOM refusal.  136 → 146; kind counts
+are now syntax 9 / entail 57 / intersect 17 / decide 63.
+
+The vectors deliberately cover both sides of each bound and the spellings that
+could launder an over-bound integer — `9.007199254740993e15` and
+`9007199254740993.0` are the same integer as `9007199254740993` and must reach
+the same refusal, because the bound is judged on the mathematical value of the
+received token rather than on a double parse.  `4503599627370495.5` pins the
+opposite direction: a non-integer near the top of the range is *not* refused,
+because step 1 already fixed a fraction's rounding deterministically.  `params-062`
+pins the BOM × size precedence — a BOM-prefixed text that is also over the
+512-octet cap reports `invalid_params_number`, not `invalid_params_size`.
+
+**Ports.** All five declare CLC-1.16.  Getting there honestly required code, not
+just a version string:
+
+| port | I-JSON raw | I-JSON decoded | BOM | carrier normalization |
+|------|-----------|----------------|-----|----------------------|
+| Go (`register`) | yes | yes | incidental | n/a (float64) |
+| Python | yes | yes (F10 fix) | yes | n/a (int/float) |
+| TypeScript | yes (added) | yes (added) | yes (F9 fix) | n/a (number) |
+| Java | yes (added) | yes (added) | yes (added) | yes (added) |
+| .NET | yes (added) | yes (added) | yes (added) | had `JsonNumber`, normalization at the entry added |
+
+Java and .NET previously implemented **none** of the I-JSON bound and no BOM
+refusal at all; both also rejected host numeric carriers at the params entry with
+`canonical_unexpected_type` before `CanonicalJson` saw them, so §6.2 step 9 was
+satisfied in the comparison path but not at the entry.  Two implementation bugs
+were caught while bringing .NET up: a trailing `.0` laundered an over-bound
+integer through the fraction spelling, and `BigInteger` is not `IConvertible`,
+so normalizing it threw a cast exception instead of refusing the value.
+
+Bumping a version string on unimplemented rules would have been a false
+conformance claim; the corpus vectors are what make the declaration checkable
+rather than asserted.
+
+**Measured.** All runners report `Total: 146 | Pass: 146 | Fail: 0`
+(Go/Python/TS/.NET, Java via `ClcVectorsTest`).  `check-offline-vectors.py`: 12
+cases, rules R2-R7, 11/11 codes.  Go `gofmt`/`go vet`/`go test -count=1 ./...`
+green; Java `mvn test` 355 green (344 pre-existing + 11 new
+`ClcInputBoundaryTest`); .NET `dotnet build` clean.
+
+**Known limits.** The parameter boundary only: the axes vary one dimension at a
+time, so no case generates the intersection of two boundary dimensions.  The
+remaining decoded-path divergence class in the differential fuzz is F1 — Go's
+`encoding/json` repairs malformed Unicode to U+FFFD before the decision function
+sees it, which CLC-v1 §6.2 step 7 exempts from a conformance claim at the
+decoded entry.  The raw entry, the sole conformance entry point, agrees across all
+implementations.  See `fuzz-divergence-report.md`.
+
+Three implementations verdict/reason consistent on all 146 vectors.
 
 ## Per-Kind Breakdown
 

@@ -122,7 +122,8 @@ the old lossy `toString("ascii")`.
 Two new cross_impl findings survived the harness fixes: F8 (TypeScript
 `validateParams` accepts falsy scalar params `0`/`-0`) and F9 (TypeScript's raw
 validator strips a leading UTF-8 BOM because JS `trim()` treats U+FEFF as
-whitespace).  Both are TypeScript-only and are documented below.  The F2
+whitespace).  Both are TypeScript-only and are documented below.  Both are now
+**fixed** — see the closeout round below for the measured rerun.  The F2
 `raw_b64` cases no longer diverge: with surrogateescape in the TS runner all
 three implementations see the invalid octet and deny on the raw path, and the
 value digests agree.
@@ -400,7 +401,7 @@ fix.
 
 ---
 
-## F8 (open, cross_impl) - TypeScript accepts falsy scalar params on the decoded path
+## F8 (fixed, cross_impl) - TypeScript accepts falsy scalar params on the decoded path
 
 **Class:** cross_impl, decoded path
 **Axis:** a13 (malformed / over-boundary input), bare scalar literals `0` and `-0`
@@ -454,7 +455,7 @@ if (!isPlainObject(params)) { throw new SemanticsError('invalid_params_number');
 
 ---
 
-## F9 (open, cross_impl) - TypeScript raw validator strips a leading UTF-8 BOM
+## F9 (fixed, cross_impl) - TypeScript raw validator strips a leading UTF-8 BOM
 
 **Class:** cross_impl, raw path
 **Axis:** a15 (i18n / Unicode edges), fed via the a13 `raw_b64` BOM template
@@ -633,3 +634,64 @@ py, ts and go on the R2 file).
   agree" in this report means the parameter boundary only.
 - The corpus and result dumps are generated artifacts and are not committed.
   Only the harness, this report and the summary are.
+
+---
+
+## Closeout round (2026-10-02, rev CLC-1.16)
+
+A rerun of the differential harness after the CLC-1.16 input-boundary work.  Same
+generator and axes as R2, smaller case count: 19,995 random cases plus the
+2,000-case boundary set, against the working tree rather than a tagged commit.
+
+### Cross-impl progression
+
+Each row is the same case set measured after one fix landed.
+
+| state | random cross_impl | raw path | decoded path | boundary | unstable |
+|-------|-------------------|----------|--------------|----------|----------|
+| baseline (HEAD) | 2,185 | 779 | 1,406 | 8 | 0 |
+| + TypeScript I-JSON integer bound | 1,144 | 47 | 1,097 | 8 | 0 |
+| + Python decoded-path `int` bound (F10) | 614 | 47 | 567 | 6 | 0 |
+| + TypeScript BOM refusal (F9) | **567** | **0** | 567 | 6 | **0** |
+
+`raw_path` divergences are now **zero**, so F9 is closed by measurement and not by
+assertion.  I-JSON-bound divergences are zero across all paths.
+
+### F10 (fixed, cross_impl) - Python accepted an over-bound integer on the decoded path
+
+**Class:** cross_impl, decoded path
+**Count:** ~530 cases in the R2-equivalent population
+**Status:** fixed; `clc_semantics.py` `_reject_non_finite` now checks an
+arbitrary-precision `int` (excluding `bool`, which is an `int` subclass in
+Python) as well as `float`.
+
+`json.loads` decodes an integer literal to a Python `int`, which is
+arbitrary-precision.  The decoded entry refused non-finite `float`s and
+over-bound `float`s but let an `int` through, so `{"n": 9007199254740993}`
+arrived intact and compared against a bound it should never have reached.  Go
+(`encoding/json` → `float64`) and TypeScript (JSON numbers → `double`) both lost
+the value to rounding at the carrier, which is why only Python diverged — and why
+it was invisible until the decoded path was compared directly rather than through
+a rounded double.
+
+This finding was **never recorded** in this report: R2 predates neither the fix
+nor a rerun that would have surfaced it, so the published record understated the
+decoded-path divergence count.
+
+### Remaining divergence class
+
+All 567 remaining random-path cases are the F1 class: Go's `encoding/json`
+replaces a lone surrogate escape or an invalid UTF-8 octet with U+FFFD before
+the decision function sees it.  CLC-v1 §6.2 step 7 exempts a repairing decoder
+from a conformance claim at the decoded entry, so these are a documented
+boundary, not an open defect — but they do mean Go cannot back a conformance
+claim on malformed-Unicode input.  The raw entry, which is the sole conformance
+entry point, agrees across all three implementations.
+
+### Corpus
+
+The shared corpus gained the machine-readable pins this report could not provide:
+`params-053`–`params-062` (10 vectors, tagged CLC-1.16) pin the I-JSON integer
+bound on both sides, the spellings that must not launder an over-bound integer,
+the non-integer case the bound must not reach, the BOM refusal, and the BOM x size
+precedence.  Corpus 136 → 146; all five ports read the new vectors.

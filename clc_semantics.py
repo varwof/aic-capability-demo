@@ -12,7 +12,7 @@ import json
 import math
 import re
 import sys
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Optional
 
 
@@ -140,7 +140,7 @@ RECOGNIZED_CONSTRAINT_IDENTITIES = {
 # numeric × enum meet is refused (`invalid_params_binding`) in either order
 # instead of reducing to the filtered enum.  Inputs without param_bounds are
 # unaffected; CLC-1.14 and earlier inputs still read.)
-CLC_REVISION = "CLC-1.15"
+CLC_REVISION = "CLC-1.16"
 # §6.2 step 4: bounds on the JCS-serialized params form.
 MAX_PARAMS_SERIALIZED_BYTES = 512
 MAX_PARAMS_NESTING = 32
@@ -177,12 +177,45 @@ def validate_capability_id(cid: str) -> None:
         raise InvalidCapabilityID("invalid_capability_id")
 
 
+IJSON_MAX_INTEGER = 2**53 - 1
+
+
+def _exceeds_ijson_integer_bound(lit: str) -> bool:
+    """True when lit is an integer-valued JSON number whose magnitude exceeds
+    2^53 - 1 (§6.2 step 3).  Such a value has no exact binary64 representation,
+    so accepting it would round the operand and decide `op <= grant` on a value
+    the sender never wrote.  Decimal is exact for the literal, so the fraction
+    and exponent spellings of an over-bound integer are recognized too."""
+    try:
+        d = Decimal(lit)
+    except (InvalidOperation, ValueError):
+        return False
+    if d != d.to_integral_value():
+        return False
+    return abs(d) > IJSON_MAX_INTEGER
+
+
 def _reject_non_finite(value: Any) -> None:
-    """Reject non-finite numbers anywhere in params (rev CLC-1.4).  JSON
-    cannot represent them, and a value that no bound check can compare must
-    not become an allow (NaN compares false against every bound)."""
-    if isinstance(value, float) and not math.isfinite(value):
-        raise InvalidParamsNumber("invalid_params_number")
+    """Reject non-finite numbers anywhere in params (rev CLC-1.4), and an
+    integer past the I-JSON bound (rev CLC-1.16 §6.2 step 3).  JSON cannot
+    represent non-finite values, and a value that no bound check can compare
+    must not become an allow (NaN compares false against every bound).
+
+    The int branch is not redundant with the float one: ``json.loads`` yields an
+    exact ``int`` for a literal carrying neither fraction nor exponent, and
+    Python's ints are unbounded, so a decoded params object can hold an integer
+    the raw path would have refused without ever producing a float to test.
+    ``bool`` is a subclass of ``int`` and is not a numeric param."""
+    if isinstance(value, bool):
+        pass
+    elif isinstance(value, int):
+        if abs(value) > IJSON_MAX_INTEGER:
+            raise InvalidParamsNumber("invalid_params_number")
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            raise InvalidParamsNumber("invalid_params_number")
+        if value.is_integer() and abs(value) > IJSON_MAX_INTEGER:
+            raise InvalidParamsNumber("invalid_params_number")
     if isinstance(value, dict):
         for v in value.values():
             _reject_non_finite(v)
@@ -549,7 +582,9 @@ def validate_raw_params(raw: str) -> None:
         except (ValueError, OverflowError):
             bad_numbers.append(lit)
             return 0.0
-        if not math.isfinite(v) or _significant_digits(lit) > 17:
+        if (not math.isfinite(v)
+                or _exceeds_ijson_integer_bound(lit)
+                or _significant_digits(lit) > 17):
             bad_numbers.append(lit)
         return v
 
@@ -1392,6 +1427,13 @@ def validate_constraint(c: str) -> None:
     if constraint_type == "max_rows":
         # Strict JSON non-negative integer, exactly one token (§8.1).
         if len(parts) != 3 or not _is_strict_json_integer(parts[2]):
+            raise InvalidConstraint(f"invalid_constraint: {c}")
+        # The constraint operand is not exempt from the I-JSON bound (§8.1
+        # max_rows × key-closure reconciliation): an integer magnitude above
+        # 2^53-1 has no exact binary64 representation, so binding it would round
+        # the ceiling and decide "op <= grant" on a value the signer never
+        # wrote.  Refused as invalid_constraint, the §8.1 reason code.
+        if _exceeds_ijson_integer_bound(parts[2]):
             raise InvalidConstraint(f"invalid_constraint: {c}")
     elif constraint_type == "time":
         # Value = JSON array of ≤32 {start,end} UTC daily windows (§8.1).

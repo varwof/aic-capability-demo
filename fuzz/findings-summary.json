@@ -1,16 +1,35 @@
 {
- "seed": 20260915,
- "case_count": 99990,
- "boundary_count": 2000,
- "axes": 15,
- "cross_impl_by_path": {
-  "decoded_path": 3303,
-  "raw_path": 207
- },
- "cross_path_by_impl": {
-  "py": 8150,
-  "ts": 8619,
-  "go": 11191
- },
- "unstable": 0
+   "seed": 20260915,
+   "case_count": 99990,
+   "boundary_count": 2000,
+   "axes": 15,
+   "cross_impl_by_path": {
+      "decoded_path": 3303,
+      "raw_path": 207
+   },
+   "cross_path_by_impl": {
+      "py": 8150,
+      "ts": 8619,
+      "go": 11191
+   },
+   "unstable": 0,
+   "closeout_2026_10_02": {
+      "clc_revision": "CLC-1.16",
+      "basis": "working tree (not a tagged commit)",
+      "case_count": 19995,
+      "boundary_count": 2000,
+      "axes": 15,
+      "cross_impl_by_path": {
+         "decoded_path": 567,
+         "raw_path": 0
+      },
+      "cross_impl_remaining_class": "F1 only (Go encoding/json U+FFFD repair; CLC-v1 §6.2 step 7 exempts a repairing decoder at the decoded entry)",
+      "unstable": 0,
+      "fixed_since_R2": [
+         "F8",
+         "F9",
+         "F10"
+      ],
+      "corpus_vectors": 146
+   }
 }
