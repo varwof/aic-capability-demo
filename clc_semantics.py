@@ -140,7 +140,14 @@ RECOGNIZED_CONSTRAINT_IDENTITIES = {
 # numeric × enum meet is refused (`invalid_params_binding`) in either order
 # instead of reducing to the filtered enum.  Inputs without param_bounds are
 # unaffected; CLC-1.14 and earlier inputs still read.)
-CLC_REVISION = "CLC-1.16"
+# (rev CLC-1.16 · 2026-09-28: corrective — I-JSON integer bound (§6.2 step 3),
+# leading-BOM refusal (step 8), host numeric-carrier normalization (step 9).)
+# (rev CLC-1.17 · 2026-10-13: corrective, no verdict change — §6.2 step 3 is
+# restated so the I-JSON integer bound is judged on the mathematical value of
+# the received token (an exactly-representable value such as 1e100 is refused),
+# number identity is the JSON number not its spelling (-0 ≡ 0, 1e3 ≡ 1000), and
+# a non-integer token is pinned to its IEEE-754 binary64 value.)
+CLC_REVISION = "CLC-1.17"
 # §6.2 step 4: bounds on the JCS-serialized params form.
 MAX_PARAMS_SERIALIZED_BYTES = 512
 MAX_PARAMS_NESTING = 32
@@ -182,10 +189,14 @@ IJSON_MAX_INTEGER = 2**53 - 1
 
 def _exceeds_ijson_integer_bound(lit: str) -> bool:
     """True when lit is an integer-valued JSON number whose magnitude exceeds
-    2^53 - 1 (§6.2 step 3).  Such a value has no exact binary64 representation,
-    so accepting it would round the operand and decide `op <= grant` on a value
-    the sender never wrote.  Decimal is exact for the literal, so the fraction
-    and exponent spellings of an over-bound integer are recognized too."""
+    2^53 - 1 (§6.2 step 3, rev CLC-1.17).  The bound is on the mathematical
+    value, not on binary64 representability: an integer-valued literal outside
+    [-(2^53 - 1), 2^53 - 1] is refused even when binary64 holds it exactly
+    (1e100, 9007199254740992), so acceptance does not turn on the carrier.
+    Accepting a larger integer would decide `op <= grant` on a value rounded to
+    a neighbour the sender never wrote (9007199254740993 -> 9007199254740992).
+    Decimal is exact for the literal, so the fraction and exponent spellings of
+    an over-bound integer are recognized too."""
     try:
         d = Decimal(lit)
     except (InvalidOperation, ValueError):

@@ -192,9 +192,9 @@ python3 jcs_check.py && node --experimental-strip-types ts/jcs_check.ts
 Corpora (in [`varwof/capability`](https://github.com/varwof/capability),
 `data/_vectors/`): `clc-v1/vectors.json` (the CLC-A authorization vectors, incl.
 the rev CLC-1.3 `allow_unresolved` verdict and §9.1 multi-grant aggregation —
-**146 vectors**; that repository's README carries the authoritative count),
+**154 vectors**; that repository's README carries the authoritative count),
 `evidence-vectors.json` (32), `crosswalk-vectors.json` (13),
-`param-bounds-vectors.json` (43), `param-bounds-meet-vectors.json` (27),
+`param-bounds-vectors.json` (49), `param-bounds-meet-vectors.json` (27),
 `param-bounds-equality-vectors.json` (11), `constraint-union-vectors.json` (12),
 `constraint-union-collation-vectors.json` (2), `resolve-vectors.json` (26),
 `property-cases.json` (1184 deterministic P11 cases),

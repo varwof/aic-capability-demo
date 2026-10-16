@@ -98,7 +98,14 @@ export const RECOGNIZED_CONSTRAINT_IDENTITIES = new Set(
 // (§7.1); contains() returns the §13.3 {contains, reason} shape.  Inputs
 // without param_bounds are unaffected; CLC-1.14 and earlier inputs still
 // read.)
-export const CLC_REVISION = 'CLC-1.16';
+// (rev CLC-1.16 · 2026-09-28: corrective — I-JSON integer bound (§6.2 step 3),
+// leading-BOM refusal (step 8), host numeric-carrier normalization (step 9).)
+// (rev CLC-1.17 · 2026-10-13: corrective, no verdict change — §6.2 step 3 is
+// restated so the I-JSON integer bound is judged on the mathematical value of
+// the received token (an exactly-representable value such as 1e100 is refused),
+// number identity is the JSON number not its spelling (-0 ≡ 0, 1e3 ≡ 1000), and
+// a non-integer token is pinned to its IEEE-754 binary64 value.)
+export const CLC_REVISION = 'CLC-1.17';
 // §6.2 step 4: bounds on the JCS-serialized params form.
 export const MAX_PARAMS_SERIALIZED_BYTES = 512;
 export const MAX_PARAMS_NESTING = 32;
@@ -314,7 +321,7 @@ export function significantDigits(lit: string): number {
 const NUMERIC_LITERAL_RE = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$/;
 
 // IJSON_MAX_INTEGER is the largest integer magnitude binary64 represents
-// exactly (2^53 - 1).  I-JSON [RFC7493] §6 names this range as interoperable.
+// exactly (2^53 - 1).  I-JSON [RFC7493] §2.2 names this range as interoperable.
 const IJSON_MAX_INTEGER = 9007199254740991n;
 
 // NUMBER_LITERAL_PARTS_RE is NUMERIC_LITERAL_RE with the parts captured, so the

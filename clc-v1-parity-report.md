@@ -1,12 +1,12 @@
 # CLC-v1 Parity Report
 
-Date: 2026-09-12 (rev 12: CLC-1.3 closeout — 105 vectors; `allow_unresolved` independent verdict, (scheme,type) constraint identity, same-day time-window grammar, `{}`≡absent params, §9.3 multi-grant aggregation; Go/Python/TS parity).  Latest: rev 16 (2026-10-02, CLC-1.16 closeout — corpus 136 → 146 with the I-JSON integer bound and leading-BOM pins; Java and .NET brought onto the same revision; see below).  Prior: rev 15 (2026-09-25, CLC-1.15 closeout — corpus 120 → 123 + cross-type comparison audit closed).
+Date: 2026-09-12 (rev 12: CLC-1.3 closeout — 105 vectors; `allow_unresolved` independent verdict, (scheme,type) constraint identity, same-day time-window grammar, `{}`≡absent params, §9.3 multi-grant aggregation; Go/Python/TS parity).  Latest: rev 17 (2026-10-13, CLC-1.17 closeout — corpus 146 → 154 and `param-bounds-vectors.json` 43 → 49 with the zero-sign, exponent-spelling, exactly-representable-over-bound, subnormal and negative-axis/`step` corners; all five ports declare CLC-1.17).  Prior: rev 16 (2026-10-02, CLC-1.16 closeout — corpus 136 → 146 with the I-JSON integer bound and leading-BOM pins; Java and .NET brought onto the same revision; see below).  Prior: rev 15 (2026-09-25, CLC-1.15 closeout — corpus 120 → 123 + cross-type comparison audit closed).
 
 ## Summary
 
 > **Snapshot note**: this Summary and the Per-Kind Breakdown below are the
 > historical rev-12 tables; they do not reflect later corpus growth.  The
-> current state is rev 16 (146 vectors, 1184 property cases) — see the rev 16
+> current state is rev 17 (154 vectors, 1184 property cases) — see the rev 17
 > section below.
 
 | Metric | Value |
@@ -225,6 +225,34 @@ decoded entry.  The raw entry, the sole conformance entry point, agrees across a
 implementations.  See `fuzz-divergence-report.md`.
 
 Three implementations verdict/reason consistent on all 146 vectors.
+
+## rev 17 Changes (2026-10-13) — CLC-1.17 closeout: numeric-corner pins
+
+CLC-1.17 is a **corrective** revision with no verdict change: it restates §6.2
+step 3 so the I-JSON integer bound is judged on the mathematical value of the
+received token (an integer-valued number outside `[−(2^53 − 1), 2^53 − 1]` is
+refused whether or not binary64 represents it exactly — `1e100` and
+`9007199254740992` are refused), states that number identity is the JSON number
+and not its spelling (`-0` ≡ `0`, `1e3` ≡ `1000`, `1.5e-3` ≡ `0.0015`), and pins
+a non-integer token of at most 17 significant digits to its IEEE-754 binary64
+value.  The correction to the CLC-1.16 justification is textual: CLC-1.16 had
+said an over-bound integer "has no exact IEEE-754 binary64 representation",
+which is not true of `2^53` or `1e100`.
+
+**Corpus.** `params-063`–`params-070` (8 vectors, kind=entail, tagged CLC-1.17)
+pin the corners: zero sign both ways, exponent ≡ decimal spelling, the
+exactly-representable-but-over-bound values (`1e100`, the largest finite
+binary64), and the subnormal (`5e-324`) in both bound directions.  146 → 154;
+kind counts are now syntax 9 / entail 65 / intersect 17 / decide 63.
+`param-bounds-vectors.json` gains `pb-044`–`pb-049` (negative-axis inclusive
+interval, zero-sign bound, and the `step 0.1` binary64-arithmetic corners):
+43 → 49.
+
+**Measured.** The Go, Python and TypeScript runners report
+`Total: 154 | Pass: 154 | Fail: 0`; the Java `ClcVectorsTest` and the .NET
+`ClcVectorsTest` assert the same corpus with zero failures.  `param-bounds` is
+49/49 (Go/Python/TS/Java; the .NET supplementary corpus passes too).  Python
+`edge_test` 50 checks, TypeScript `edge_test` 43 checks green.
 
 ## Per-Kind Breakdown
 

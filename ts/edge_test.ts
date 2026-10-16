@@ -77,7 +77,7 @@ for (const [label, raw, want] of rawCases) {
     }
 }
 
-// The I-JSON integer bound (rev CLC-1.16 §6.2 step 3, [RFC7493] §6): an
+// The I-JSON integer bound (rev CLC-1.16 §6.2 step 3, [RFC7493] §2.2): an
 // integer-valued number past 2^53 - 1 has no exact binary64 representation, so
 // accepting it would decide `op <= grant` on a value the sender never wrote.
 // Every spelling of an over-bound integer is refused, while a genuine fraction

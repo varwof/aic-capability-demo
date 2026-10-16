@@ -3,10 +3,15 @@
 // For each case (parent P, child C) and every operation o in the shared `ops`
 // sample: Contains(P, C) MUST NOT raise, and
 // Contains(P, C) true AND Entails(C, o) true ==> Entails(P, o) true.
+//
+// Also asserts antisymmetry on semantic equivalence classes (CL 13.10.8, core
+// §13.3): Contains(P, C) and Contains(C, P) both true is allowed only when P
+// and C fall in the same semantic class (same id, params with `params:{}` ≡
+// absent), never across two distinct classes.
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { contains, entails } from './clc_semantics.ts';
+import { canonicalJSON, contains, entails } from './clc_semantics.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const path = process.env.CLC_D_PROPERTY_CASES
@@ -20,10 +25,17 @@ const doc = JSON.parse(readFileSync(path, 'utf8')) as {
     }[];
 };
 
+function semanticClass(g: { id: string; params?: Record<string, unknown> | null }): string {
+    const p = g.params && Object.keys(g.params).length > 0 ? g.params : null;
+    return canonicalJSON({ id: g.id, params: p });
+}
+
 let containedPairs = 0;
 let opChecks = 0;
 let violations = 0;
 let raised = 0;
+let antisymMutual = 0;
+let antisymViolations = 0;
 for (const c of doc.cases) {
     let r: { contains: boolean; reason?: string };
     try {
@@ -34,6 +46,15 @@ for (const c of doc.cases) {
         continue;
     }
     if (r.contains) containedPairs++;
+    if (r.contains && contains(c.child, c.parent).contains) {
+        antisymMutual++;
+        if (semanticClass(c.parent) !== semanticClass(c.child)) {
+            antisymViolations++;
+            if (antisymViolations <= 5) {
+                console.log(`ANTISYM VIOLATION ${c.id} parent=${JSON.stringify(c.parent)} child=${JSON.stringify(c.child)}`);
+            }
+        }
+    }
     for (const o of doc.ops) {
         opChecks++;
         if (!entails(c.child, o).entails) continue;
@@ -46,5 +67,5 @@ for (const c of doc.cases) {
     }
 }
 
-console.log(`property: ${doc.cases.length} cases, ${containedPairs} contained pairs, ${opChecks} op-checks, ${raised} raises, ${violations} violations`);
-process.exit(violations || raised ? 1 : 0);
+console.log(`property: ${doc.cases.length} cases, ${containedPairs} contained pairs, ${opChecks} op-checks, ${raised} raises, ${violations} violations, ${antisymMutual} mutual pairs, ${antisymViolations} antisymmetry violations`);
+process.exit(violations || raised || antisymViolations ? 1 : 0);

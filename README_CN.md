@@ -175,8 +175,8 @@ python3 jcs_check.py && node --experimental-strip-types ts/jcs_check.ts
 
 语料（位于 [`varwof/capability`](https://github.com/varwof/capability) 的 `data/_vectors/`）：
 `clc-v1/vectors.json`（CLC-A 授权向量，含 rev CLC-1.3 的 `allow_unresolved` verdict 与 §9.1
-多 grant 聚合——**146 条**；权威计数以该仓 README 为准）、`evidence-vectors.json`（32）、
-`crosswalk-vectors.json`（13）、`param-bounds-vectors.json`（43）、
+多 grant 聚合——**154 条**；权威计数以该仓 README 为准）、`evidence-vectors.json`（32）、
+`crosswalk-vectors.json`（13）、`param-bounds-vectors.json`（49）、
 `param-bounds-meet-vectors.json`（27）、`param-bounds-equality-vectors.json`（11）、
 `constraint-union-vectors.json`（12）、`constraint-union-collation-vectors.json`（2）、
 `resolve-vectors.json`（26）、`property-cases.json`（1184 条确定性 P11 用例）、
