@@ -23,7 +23,32 @@ jobs:
         run: git clone --depth 1 https://github.com/varwof/capability.git ../capability
 
       - name: Syntax check
-        run: python3 -m py_compile clc_semantics.py vectors-run.py contains-vectors-run.py contain-property-run.py param-bounds-vectors-run.py param-bounds-meet-vectors-run.py param-bounds-meet-property-run.py resolve-vectors-run.py constraint-union-vectors-run.py authorize-chain-vectors-run.py
+        run: python3 -m py_compile clc_semantics.py vectors-run.py contains-vectors-run.py contain-property-run.py param-bounds-vectors-run.py param-bounds-meet-vectors-run.py param-bounds-meet-property-run.py resolve-vectors-run.py constraint-union-vectors-run.py authorize-chain-vectors-run.py evidence_semantics.py scheme_decl.py ocmp.py symmetry-vectors-run.py quantity-vectors-run.py scheme-declaration-vectors-run.py offline-vectors-run.py profile-declarations-run.py
+
+      - name: Symmetry corpus (authorization + evidence, Python)
+        env:
+          CLC_CAPABILITY_DIR: ../capability
+        run: python3 symmetry-vectors-run.py
+
+      - name: Declared domains + quantity corpus (Python)
+        env:
+          CLC_CAPABILITY_DIR: ../capability
+        run: python3 quantity-vectors-run.py
+
+      - name: Scheme declaration corpus (Python)
+        env:
+          CLC_CAPABILITY_DIR: ../capability
+        run: python3 scheme-declaration-vectors-run.py
+
+      - name: OCMP offline profile (Python)
+        env:
+          CLC_CAPABILITY_DIR: ../capability
+        run: python3 offline-vectors-run.py
+
+      - name: Profile declarations 6/7 (Python)
+        env:
+          CLC_CAPABILITY_DIR: ../capability
+        run: python3 profile-declarations-run.py
 
       - name: CLC-v1 vectors (verdict + reason)
         env:
@@ -96,6 +121,31 @@ jobs:
 
       - name: Fetch CLC-v1 vectors (capability repo)
         run: git clone --depth 1 https://github.com/varwof/capability.git ../capability
+
+      - name: Symmetry corpus (authorization + evidence, TS)
+        env:
+          CLC_CAPABILITY_DIR: ../capability
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/symmetry-vectors-run.ts
+
+      - name: Declared domains + quantity corpus (TS)
+        env:
+          CLC_CAPABILITY_DIR: ../capability
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/quantity-vectors-run.ts
+
+      - name: Scheme declaration corpus (TS)
+        env:
+          CLC_CAPABILITY_DIR: ../capability
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/scheme-declaration-vectors-run.ts
+
+      - name: OCMP offline profile (TS)
+        env:
+          CLC_CAPABILITY_DIR: ../capability
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/offline-vectors-run.ts
+
+      - name: Profile declarations 6/7 (TS)
+        env:
+          CLC_CAPABILITY_DIR: ../capability
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/profile-declarations-run.ts
 
       - name: CLC-v1 vectors (verdict + reason, TS)
         env:

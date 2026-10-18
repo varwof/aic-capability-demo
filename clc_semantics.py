@@ -147,7 +147,7 @@ RECOGNIZED_CONSTRAINT_IDENTITIES = {
 # the received token (an exactly-representable value such as 1e100 is refused),
 # number identity is the JSON number not its spelling (-0 ≡ 0, 1e3 ≡ 1000), and
 # a non-integer token is pinned to its IEEE-754 binary64 value.)
-CLC_REVISION = "CLC-1.17"
+CLC_REVISION = "CLC-1.19"
 # §6.2 step 4: bounds on the JCS-serialized params form.
 MAX_PARAMS_SERIALIZED_BYTES = 512
 MAX_PARAMS_NESTING = 32
@@ -2082,3 +2082,191 @@ def authorize_with_chain(chain: list, op: dict) -> dict:
     except CLCError as e:
         return {"verdict": VERDICT_DENY, "reason": str(e)}
     return authorize(effective, op)
+
+
+# --- Declared parameter domains (CLC-1.19 §6.7) --------------------------------
+#
+# The declaration is applied as a pre-comparison normalization: a value whose
+# domain has a numeric normal form is rewritten, and the ordinary relations then
+# run unchanged.  `quantity` is normalized to its number; the three string-shaped
+# domains (`decimal-string`, `subdomain`, `path-prefix`) are decided in the
+# *_with_domains pre-check and then neutralized so the ordinary relation does not
+# re-compare them by shape.  A domain name the revision does not define is
+# refused with `unsupported_domain`.
+
+_IMPLEMENTED_DOMAINS = {
+    "bound", "enum", "exact", "quantity",
+    "decimal-string", "subdomain", "path-prefix",
+}
+
+
+def normalize_for_domains(params, dm):
+    """Rewrite declared quantity values; return (params, reason)."""
+    if not params or not dm:
+        return params, ""
+    out = {}
+    for k, v in params.items():
+        spec = dm.get(k)
+        if not spec:
+            out[k] = v
+            continue
+        domain = spec.get("domain")
+        if domain in ("bound", "enum", "exact", "decimal-string", "subdomain", "path-prefix"):
+            out[k] = v
+            continue
+        if domain not in _IMPLEMENTED_DOMAINS:
+            return None, "unsupported_domain"
+        val = v.get("value") if isinstance(v, dict) else None
+        unit = v.get("unit") if isinstance(v, dict) else None
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or not isinstance(unit, str) or not unit:
+            return None, "invalid_params_binding"
+        if unit != spec.get("unit"):
+            return None, "unit_mismatch"
+        scale = 0
+        if "scale" in v:
+            s = v["scale"]
+            if isinstance(s, bool) or not isinstance(s, (int, float)) or s != int(s):
+                return None, "invalid_params_binding"
+            scale = int(s)
+        out[k] = float(val) * (10.0 ** -scale)
+    return out, ""
+
+
+
+
+_STRING_DOMAINS = {"decimal-string", "subdomain", "path-prefix"}
+
+# A canonical §6.7 `decimal-string` literal.  Decimal() on its own also accepts
+# underscores, inf/nan/sNaN and the half-written `500.`/`.5` forms; those are not
+# decimal literals, so they are refused here to keep the implementations aligned.
+_DECIMAL_RE = re.compile(r"^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$")
+
+
+def _parse_decimal(s):
+    if not _DECIMAL_RE.match(s):
+        return None
+    return Decimal(s)
+
+
+def _normalize_domain(s):
+    """A DNS name or None.
+
+    Lowercases, drops at most one trailing dot (the root), and requires every
+    label to be non-empty — mirroring the Go/Java/TS implementations.  A name
+    with more than one trailing dot has an empty label and is not a DNS name,
+    so it is refused rather than silently collapsed."""
+    if any(ch.isspace() for ch in s):
+        return None
+    t = s.lower()
+    if t.endswith("."):
+        t = t[:-1]
+    if not t or any(label == "" for label in t.split(".")):
+        return None
+    return t
+
+
+def _string_domain_covers(domain, parent, child):
+    """(ok, reason) for one string-shaped declared domain."""
+    import posixpath
+    if not isinstance(parent, str) or not isinstance(child, str):
+        return False, "invalid_params_binding"
+    if domain == "decimal-string":
+        p, c = _parse_decimal(parent), _parse_decimal(child)
+        if p is None or c is None:
+            return False, "invalid_params_binding"
+        return (True, "") if c <= p else (False, "params_exceed_grant")
+    if domain == "subdomain":
+        p, c = _normalize_domain(parent), _normalize_domain(child)
+        if p is None or c is None:
+            return False, "invalid_params_binding"
+        return (True, "") if (c == p or c.endswith("." + p)) else (False, "params_exceed_grant")
+    if domain == "path-prefix":
+        if not parent.startswith("/") or not child.startswith("/"):
+            return False, "invalid_params_binding"
+        if parent.startswith("//") or child.startswith("//"):
+            return False, "invalid_params_binding"
+        if posixpath.normpath(parent) != parent or posixpath.normpath(child) != child:
+            return False, "invalid_params_binding"
+        p = parent.rstrip("/") or "/"
+        return (True, "") if (child == p or child.startswith(p + "/")) else (False, "params_exceed_grant")
+    return False, "unsupported_domain"
+
+
+def authorize_set_with_domains(grants, op, dm):
+    op_params = dict(op.get("params") or {})
+    opts = []
+    for g in grants:
+        if any(k in dm for k in (g.get("param_bounds") or {})):
+            return {"verdict": VERDICT_DENY, "reason": "invalid_params_binding"}
+        g_params = dict(g.get("params") or {})
+        usable = True
+        for name, spec in dm.items():
+            if spec.get("domain") in _STRING_DOMAINS:
+                if name not in g_params or name not in op_params:
+                    continue
+                ok, reason = _string_domain_covers(spec["domain"], g_params[name], op_params[name])
+                if not ok:
+                    if reason == "invalid_params_binding":
+                        return {"verdict": VERDICT_DENY, "reason": reason}
+                    usable = False
+                    break
+                g_params[name] = "domain-covered"
+                op_params[name] = "domain-covered"
+        if not usable:
+            continue
+        params, reason = normalize_for_domains(g_params, dm)
+        if reason:
+            return {"verdict": VERDICT_DENY, "reason": reason}
+        opts.append({**g, "params": params})
+    if grants and not opts:
+        return {"verdict": VERDICT_DENY, "reason": "params_exceed_grant"}
+    params, reason = normalize_for_domains(op_params, dm)
+    if reason:
+        return {"verdict": VERDICT_DENY, "reason": reason}
+    return authorize_set(opts, {**op, "params": params})
+
+
+def entails_with_domains(grant, op, dm):
+    gp = dict(grant.get("params") or {})
+    opp = dict(op.get("params") or {})
+    for name, spec in dm.items():
+        if spec.get("domain") in _STRING_DOMAINS and name in gp and name in opp:
+            ok, reason = _string_domain_covers(spec["domain"], gp[name], opp[name])
+            if not ok:
+                return {"entails": False, "reason": reason}
+            gp[name] = "domain-covered"
+            opp[name] = "domain-covered"
+    gp, reason = normalize_for_domains(gp, dm)
+    if reason:
+        return {"entails": False, "reason": reason}
+    opp, reason = normalize_for_domains(opp, dm)
+    if reason:
+        return {"entails": False, "reason": reason}
+    return entails({**grant, "params": gp}, {**op, "params": opp})
+
+
+def contains_with_domains(parent, child, parent_dm, child_dm):
+    if any(k in parent_dm for k in (parent.get("param_bounds") or {})) or \
+       any(k in child_dm for k in (child.get("param_bounds") or {})):
+        return {"contains": False, "reason": "params_not_narrower"}
+    pp = dict(parent.get("params") or {})
+    cp = dict(child.get("params") or {})
+    for name, pspec in parent_dm.items():
+        cspec = child_dm.get(name)
+        if not cspec:
+            continue
+        if pspec.get("domain") != cspec.get("domain"):
+            return {"contains": False, "reason": "params_not_narrower"}
+        if pspec.get("domain") in _STRING_DOMAINS and name in pp and name in cp:
+            ok, _ = _string_domain_covers(pspec["domain"], pp[name], cp[name])
+            if not ok:
+                return {"contains": False, "reason": "params_not_narrower"}
+            pp[name] = "domain-covered"
+            cp[name] = "domain-covered"
+    pp, reason = normalize_for_domains(pp, parent_dm)
+    if reason:
+        return {"contains": False, "reason": "params_not_narrower"}
+    cp, reason = normalize_for_domains(cp, child_dm)
+    if reason:
+        return {"contains": False, "reason": "params_not_narrower"}
+    return contains({**parent, "params": pp}, {**child, "params": cp})

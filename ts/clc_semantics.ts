@@ -105,7 +105,7 @@ export const RECOGNIZED_CONSTRAINT_IDENTITIES = new Set(
 // the received token (an exactly-representable value such as 1e100 is refused),
 // number identity is the JSON number not its spelling (-0 ≡ 0, 1e3 ≡ 1000), and
 // a non-integer token is pinned to its IEEE-754 binary64 value.)
-export const CLC_REVISION = 'CLC-1.17';
+export const CLC_REVISION = 'CLC-1.19';
 // §6.2 step 4: bounds on the JCS-serialized params form.
 export const MAX_PARAMS_SERIALIZED_BYTES = 512;
 export const MAX_PARAMS_NESTING = 32;
@@ -2548,4 +2548,214 @@ export function authorizeWithChain(chain: Grant[], op: Operation): Decision {
         return { verdict: VERDICT_DENY, reason: (e as Error).message };
     }
     return authorize(effective, op);
+}
+
+// --- Declared parameter domains (CLC-1.19 §6.7) ------------------------------
+//
+// The declaration is applied as a pre-comparison normalization: a value whose
+// domain has a numeric normal form is rewritten, and the ordinary relations then
+// run unchanged.  `quantity` is normalized to its number; the three string-shaped
+// domains (`decimal-string`, `subdomain`, `path-prefix`) are decided in the
+// *WithDomains pre-check and then neutralized so the ordinary relation does not
+// re-compare them by shape.  A domain name the revision does not define is
+// refused with `unsupported_domain`.
+
+export interface DomainSpec {
+    domain: string;
+    unit?: string;
+}
+
+export type DomainMap = Record<string, DomainSpec>;
+
+const IMPLEMENTED_DOMAINS = new Set([
+    'bound', 'enum', 'exact', 'quantity',
+    'decimal-string', 'subdomain', 'path-prefix',
+]);
+
+const STRING_DOMAINS = new Set(['decimal-string', 'subdomain', 'path-prefix']);
+
+function parseDecimal(s: string): { n: bigint; e: number } | null {
+    const m = /^([+-]?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(s);
+    if (!m) return null;
+    const frac = m[3] ?? '';
+    const digits = (m[2] + frac).replace(/^0+(?=\d)/, '');
+    const n = (m[1] === '-' ? -1n : 1n) * BigInt(digits === '' ? '0' : digits);
+    const e = (m[4] ? parseInt(m[4], 10) : 0) - frac.length;
+    return { n, e };
+}
+
+function compareDecimal(a: { n: bigint; e: number }, b: { n: bigint; e: number }): number {
+    const e = Math.min(a.e, b.e);
+    const A = a.n * 10n ** BigInt(a.e - e);
+    const B = b.n * 10n ** BigInt(b.e - e);
+    return A < B ? -1 : A > B ? 1 : 0;
+}
+
+function cleanPath(p: string): boolean {
+    if (!p.startsWith('/')) return false;
+    if (p.length > 1 && p.endsWith('/')) return false;
+    for (const seg of p.split('/').slice(1)) {
+        if (seg === '' || seg === '.' || seg === '..') return false;
+    }
+    return true;
+}
+
+function stringDomainCovers(domain: string, parent: unknown, child: unknown): [boolean, string] {
+    if (typeof parent !== 'string' || typeof child !== 'string') {
+        return [false, 'invalid_params_binding'];
+    }
+    if (domain === 'decimal-string') {
+        const p = parseDecimal(parent);
+        const c = parseDecimal(child);
+        if (!p || !c) return [false, 'invalid_params_binding'];
+        return compareDecimal(c, p) <= 0 ? [true, ''] : [false, 'params_exceed_grant'];
+    }
+    if (domain === 'subdomain') {
+        if (/\s/.test(parent) || /\s/.test(child)) {
+            return [false, 'invalid_params_binding'];
+        }
+        const p = parent.toLowerCase().replace(/\.$/, '');
+        const c = child.toLowerCase().replace(/\.$/, '');
+        if (!p || !c || [...p.split('.'), ...c.split('.')].some((x) => x === '')) {
+            return [false, 'invalid_params_binding'];
+        }
+        return c === p || c.endsWith(`.${p}`) ? [true, ''] : [false, 'params_exceed_grant'];
+    }
+    if (domain === 'path-prefix') {
+        if (!cleanPath(parent) || !cleanPath(child)) return [false, 'invalid_params_binding'];
+        const p = parent === '/' ? '/' : parent.replace(/\/$/, '');
+        return child === p || child.startsWith(p === '/' ? '/' : `${p}/`)
+            ? [true, '']
+            : [false, 'params_exceed_grant'];
+    }
+    return [false, 'unsupported_domain'];
+}
+
+export function normalizeForDomains(
+    params: Record<string, unknown> | undefined,
+    dm: DomainMap,
+): [Record<string, unknown> | undefined, string] {
+    if (!params || Object.keys(dm).length === 0) return [params, ''];
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(params)) {
+        const spec = dm[k];
+        if (!spec) {
+            out[k] = v;
+            continue;
+        }
+        if (spec.domain === 'bound' || spec.domain === 'enum' || spec.domain === 'exact') {
+            out[k] = v;
+            continue;
+        }
+        if (STRING_DOMAINS.has(spec.domain)) {
+            out[k] = v;
+            continue;
+        }
+        if (!IMPLEMENTED_DOMAINS.has(spec.domain)) return [undefined, 'unsupported_domain'];
+        if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+            return [undefined, 'invalid_params_binding'];
+        }
+        const q = v as Record<string, unknown>;
+        const val = q.value;
+        const unit = q.unit;
+        if (typeof val !== 'number' || !Number.isFinite(val) || typeof unit !== 'string' || unit.length === 0) {
+            return [undefined, 'invalid_params_binding'];
+        }
+        if (unit !== spec.unit) return [undefined, 'unit_mismatch'];
+        let scale = 0;
+        if ('scale' in q) {
+            const s = q.scale;
+            if (typeof s !== 'number' || !Number.isInteger(s)) return [undefined, 'invalid_params_binding'];
+            scale = s;
+        }
+        out[k] = val * 10 ** -scale;
+    }
+    return [out, ''];
+}
+
+export function authorizeSetWithDomains(grants: Grant[], op: Operation, dm: DomainMap): Decision {
+    const opParams: Record<string, unknown> = { ...(op.params ?? {}) };
+    const norm: Grant[] = [];
+    for (const g of grants) {
+        if (g.param_bounds && Object.keys(g.param_bounds).some((k) => k in dm)) {
+            return { verdict: 'deny', reason: 'invalid_params_binding' } as Decision;
+        }
+        const gParams: Record<string, unknown> = { ...(g.params ?? {}) };
+        let usable = true;
+        for (const [name, spec] of Object.entries(dm)) {
+            if (!STRING_DOMAINS.has(spec.domain)) continue;
+            if (!(name in gParams) || !(name in opParams)) continue;
+            const [ok, reason] = stringDomainCovers(spec.domain, gParams[name], opParams[name]);
+            if (!ok) {
+                if (reason === 'invalid_params_binding') {
+                    return { verdict: 'deny', reason } as Decision;
+                }
+                usable = false;
+                break;
+            }
+            gParams[name] = 'domain-covered';
+            opParams[name] = 'domain-covered';
+        }
+        if (!usable) continue;
+        const [params, reason] = normalizeForDomains(gParams, dm);
+        if (reason) return { verdict: 'deny', reason } as Decision;
+        norm.push({ ...g, params });
+    }
+    if (grants.length > 0 && norm.length === 0) {
+        return { verdict: 'deny', reason: 'params_exceed_grant' } as Decision;
+    }
+    const [params, reason] = normalizeForDomains(opParams, dm);
+    if (reason) return { verdict: 'deny', reason } as Decision;
+    return authorizeSet(norm, { ...op, params });
+}
+
+export function entailsWithDomains(grant: Grant, op: Operation, dm: DomainMap): MatchResult {
+    const gp: Record<string, unknown> = { ...(grant.params ?? {}) };
+    const opp: Record<string, unknown> = { ...(op.params ?? {}) };
+    for (const [name, spec] of Object.entries(dm)) {
+        if (!STRING_DOMAINS.has(spec.domain)) continue;
+        if (!(name in gp) || !(name in opp)) continue;
+        const [ok, reason] = stringDomainCovers(spec.domain, gp[name], opp[name]);
+        if (!ok) return { entails: false, reason } as MatchResult;
+        gp[name] = 'domain-covered';
+        opp[name] = 'domain-covered';
+    }
+    const [gp2, r1] = normalizeForDomains(gp, dm);
+    if (r1) return { entails: false, reason: r1 } as MatchResult;
+    const [opp2, r2] = normalizeForDomains(opp, dm);
+    if (r2) return { entails: false, reason: r2 } as MatchResult;
+    return entails({ ...grant, params: gp2 }, { ...op, params: opp2 });
+}
+
+export function containsWithDomains(
+    parent: Grant,
+    child: Grant,
+    parentDm: DomainMap,
+    childDm: DomainMap,
+): ContainmentResult {
+    const pbConflict = (g: Grant, gdm: DomainMap): boolean =>
+        !!g.param_bounds && Object.keys(g.param_bounds).some((k) => k in gdm);
+    if (pbConflict(parent, parentDm) || pbConflict(child, childDm)) {
+        return { contains: false, reason: 'params_not_narrower' } as ContainmentResult;
+    }
+    const pp: Record<string, unknown> = { ...(parent.params ?? {}) };
+    const cp: Record<string, unknown> = { ...(child.params ?? {}) };
+    for (const [name, pspec] of Object.entries(parentDm)) {
+        const cspec = childDm[name];
+        if (!cspec) continue;
+        if (pspec.domain !== cspec.domain) {
+            return { contains: false, reason: 'params_not_narrower' } as ContainmentResult;
+        }
+        if (STRING_DOMAINS.has(pspec.domain) && name in pp && name in cp) {
+            const [ok] = stringDomainCovers(pspec.domain, pp[name], cp[name]);
+            if (!ok) return { contains: false, reason: 'params_not_narrower' } as ContainmentResult;
+            pp[name] = 'domain-covered';
+            cp[name] = 'domain-covered';
+        }
+    }
+    const [pp2, r1] = normalizeForDomains(pp, parentDm);
+    if (r1) return { contains: false, reason: 'params_not_narrower' } as ContainmentResult;
+    const [cp2, r2] = normalizeForDomains(cp, childDm);
+    if (r2) return { contains: false, reason: 'params_not_narrower' } as ContainmentResult;
+    return contains({ ...parent, params: pp2 }, { ...child, params: cp2 });
 }

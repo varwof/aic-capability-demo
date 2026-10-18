@@ -4,6 +4,9 @@
 
 > ⚠️ **Preview** — Not for production use. APIs and features may change before official release.
 
+Declared language revision: **CLC-1.19** (`CLC_REVISION` in `clc_semantics.py` and
+`ts/clc_semantics.ts`).
+
 A runnable, end-to-end demonstration of the AIC capability authorization
 semantics: **AI-proposed least privilege → tool validation (version pinned) →
 role-grant intersection → cryptographically bound into the AIC → gateway
