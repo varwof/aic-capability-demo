@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLC Conformance Lab — Official Vectors &amp; Custom Inputs | Varwof</title>
+<meta name="description" content="Run the official CLC-v1 corpus or your own grant, operation, containment, intersection and resolve vectors in the browser, with expected versus actual results and downloadable evidence.">
+<link rel="canonical" href="https://www.varwof.com/clc/lab/">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/clc/lab/lab.css">
+</head>
+<body>
+<a class="skip-link" href="#main-content">Skip to content</a>
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/">Varwof<span>.</span></a>
+    <span class="grow"></span>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="/clc/">CLC Overview</a>
+      <a class="active" href="/clc/lab/" aria-current="page">Conformance Lab</a>
+      <a href="https://www.varwof.org/docs/clc/readme.html">Language Reference</a>
+      <a href="https://github.com/varwof/capability">GitHub</a>
+      <a href="/clc/index.zh.html" lang="zh-CN">中文概览</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main-content">
+  <section class="hero wrap">
+    <div class="eyebrow">CLC Conformance Lab</div>
+    <h1>Run the language, <span class="grad">not a screenshot of it</span>.</h1>
+    <p>Execute the official CLC corpus in your browser or paste a custom vector. Every result shows expected versus actual output, the canonical reason code, and downloadable evidence.</p>
+    <div class="badges">
+      <span class="badge hl" data-revision>CLC reference</span>
+      <span class="badge">332 official vectors</span>
+      <span class="badge">6 suites</span>
+      <span class="badge ok">Client-side only</span>
+    </div>
+  </section>
+
+  <section class="wrap lab-shell" id="lab">
+    <aside class="controls">
+      <div class="panel">
+        <h2>Official corpus</h2>
+        <p>Run the same machine-readable vectors used by the public CLC runners.</p>
+        <label for="suite">Test suite</label>
+        <select id="suite"></select>
+        <button id="run-suite" class="primary">Run Official Vectors</button>
+      </div>
+
+      <div class="panel">
+        <h2>Custom vector</h2>
+        <p>Edit JSON directly. The browser evaluates it using the same TypeScript CLC kernel.</p>
+        <label for="function">Function</label>
+        <select id="function"></select>
+        <label for="editor">Input JSON</label>
+        <textarea id="editor" spellcheck="false"></textarea>
+        <button id="run-custom" class="primary">Evaluate Custom Input</button>
+      </div>
+
+      <div class="panel compact">
+        <h2>Evidence</h2>
+        <p id="summary" aria-live="polite">Choose an official suite or run a custom vector.</p>
+        <button id="download" disabled>Download Evidence JSON</button>
+      </div>
+    </aside>
+
+    <section class="results" aria-label="Test results">
+      <div class="results-head">
+        <div>
+          <div class="eyebrow">Decision evidence</div>
+          <h2>Expected vs actual</h2>
+        </div>
+        <span class="badge">No network evaluation</span>
+      </div>
+      <div id="result">
+        <div class="empty">
+          <strong>Ready.</strong>
+          <span>Official vectors compare against the published expectation. Custom vectors compare against an optional <code>expect</code> field and always return full output.</span>
+        </div>
+      </div>
+    </section>
+  </section>
+
+  <section class="wrap scope">
+    <div class="scope-card">
+      <h2>What is evaluated</h2>
+      <p>Authorization, capability entailment, parameter bounds, intersection, containment, obligation resolution, constraint union, chain authorization and decision records.</p>
+    </div>
+    <div class="scope-card">
+      <h2>What this page is not</h2>
+      <p>A signature verifier or a carrier implementation. CLC judges authority semantics; certificate status, signatures and transport are separate layers.</p>
+    </div>
+    <div class="scope-card">
+      <h2>Reproduce elsewhere</h2>
+      <p>The vector files are copied from <code>varwof/capability</code>. Evidence JSON can be downloaded and compared with the Go or Python runners.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>© 2026 Varwof. All rights reserved.</div>
+    <div>CLC-v1 preview. Browser execution uses the same TypeScript reference semantics used by the public conformance runners.</div>
+  </div>
+</footer>
+<script type="module" src="/clc/lab/app.js"></script>
+</body>
+</html>
