@@ -151,7 +151,7 @@ export function canonicalReason(reason?: string): string {
     return i >= 0 ? reason.slice(0, i) : reason;
 }
 
-export function validateCapabilityId(id?: string | null): void {
+export function validateCapabilityID(id?: string | null): void {
     if (!id) {
         throw new SemanticsError('missing_capability_id');
     }
@@ -509,7 +509,7 @@ function scanRawParams(raw: string, strict: boolean): { value: unknown; compact:
             compact += utf8Len(scalar);
             i += scalar.length;
         }
-        fail();
+        throw new SemanticsError('invalid_params_number');
     };
 
     const parseValue = (): unknown => {
@@ -549,7 +549,7 @@ function scanRawParams(raw: string, strict: boolean): { value: unknown; compact:
                 }
                 i++;
                 if (seen.has(key) && strict) {
-                    throw new SemanticsError(`invalid_params_duplicate_key: ${key}`);
+                    throw new SemanticsError("invalid_params_duplicate_key: " + JSON.stringify(key));
                 }
                 seen.add(key);
                 obj[key] = parseValue();
@@ -861,24 +861,46 @@ export function canonicalJSON(v: unknown): string {
     throw new SemanticsError('canonical_unexpected_type');
 }
 
-// computeActionId is §4.3's projection identity over the declared material
+// computeActionID is §4.3's projection identity over the declared material
 // fields: clc-action:1:<type>:<suite>:<b64url(sha256(JCS(projection)))>.  A
 // declared field that is absent makes the action non-matchable.
-export function computeActionId(
-    actionType: string,
-    materialFields: string[],
-    suite: string,
-    action: Record<string, unknown>,
+//
+// Two call layouts are accepted and produce identical bytes:
+//
+//   - Go reference form — `computeActionID(def, suite, action)`, where `def`
+//     is an ActionTypeDefinition object;
+//   - this file's historical form —
+//     `computeActionID(actionType, materialFields, suite, action)`.
+export function computeActionID(
+    defOrType: ActionTypeDefinition | string,
+    ...rest: unknown[]
 ): string {
-    const projection: Record<string, unknown> = {};
-    for (const field of materialFields) {
-        if (!Object.prototype.hasOwnProperty.call(action, field)) {
-            throw new SemanticsError('action_not_matchable: ' + field);
-        }
-        projection[field] = action[field];
+    let actionType: string;
+    let materialFields: string[];
+    let suite: string;
+    let action: Record<string, unknown>;
+    if (typeof defOrType === 'object' && defOrType !== null) {
+        // Go layout: the second positional is the suite, the third the action.
+        actionType = defOrType.type;
+        materialFields = defOrType.material_fields;
+        suite = rest[0] as string;
+        action = rest[1] as Record<string, unknown>;
+    } else {
+        actionType = defOrType;
+        materialFields = rest[0] as string[];
+        suite = rest[1] as string;
+        action = rest[2] as Record<string, unknown>;
     }
-    const digest = createHash('sha256').update(canonicalJSON(projection), 'utf8').digest('base64url');
-    return `clc-action:1:${actionType}:${suite}:${digest}`;
+    // Go `ComputeActionID` dispatches through MaterialProjection (which
+    // validates the type definition) and then through the suite-pinned hash, so
+    // an unknown suite or an unmatchable projection is refused here too.
+    const definition = actionTypeDefinition(actionType, materialFields);
+    validateActionTypeDefinition(definition);
+    if (!suiteValid(suite)) throw new SemanticsError(`action_suite: ${JSON.stringify(suite)}`);
+    const projection = materialProjection(definition, action);
+    const canonical = Buffer.from(canonicalJSON(projection), 'utf8');
+    const digest = createHash('sha256').update(canonical).digest('base64url');
+    return actionIdString(actionId(definition.type, suite, { alg: digestAlgOf(suite), value: digest }));
 }
 
 // valueSubset checks if a single value is a subset of the grant value.
@@ -1598,12 +1620,12 @@ export function paramsSubset(
 // entails checks if a grant covers an operation per CLC-v1 §6.3.
 export function entails(grant: Grant, op: Operation): MatchResult {
     try {
-        validateCapabilityId(grant.id);
+        validateCapabilityID(grant.id);
     } catch (e) {
         return { entails: false, reason: (e as SemanticsError).message };
     }
     try {
-        validateCapabilityId(op.id);
+        validateCapabilityID(op.id);
     } catch (e) {
         return { entails: false, reason: (e as SemanticsError).message };
     }
@@ -1697,7 +1719,7 @@ export function contains(parent: Grant, child: Grant): ContainmentResult {
     // valid CLC-A code (invalid_capability_id, invalid_params_*).
     for (const g of [parent, child]) {
         try {
-            validateCapabilityId(g.id);
+            validateCapabilityID(g.id);
         } catch (e) {
             return { contains: false, reason: (e as SemanticsError).message };
         }
@@ -2213,14 +2235,14 @@ export function authorize(
     return authorizeSet([effectiveGrant], op);
 }
 
-// authorizeJsonText is the normative entry point for a caller that holds the
+// authorizeJSONText is the normative entry point for a caller that holds the
 // operation's params as JSON text: validateRawParams runs the §6.2
 // input-boundary checks on that text and returns the decoded object, so one
 // call covers the boundary and the decision.  Prefer it over JSON.parse
 // followed by authorizeSet, because the parse is lossy for exactly the inputs
 // §6.2 refuses (§6.2 item 7).  rawParams may be empty for an operation that
 // carries no params; a refusal is returned as deny with the §6.2 reason code.
-export function authorizeJsonText(
+export function authorizeJSONText(
     grants: Array<Grant | null | undefined>,
     opId: string,
     rawParams = '',
@@ -2245,7 +2267,7 @@ export function authorizeJsonText(
 // JSON decoder no longer carries the information those checks use: a decoder
 // that repairs an invalid surrogate or octet produces a value indistinguishable
 // from a legitimate U+FFFD (§6.2 item 7).  A caller holding the raw text should
-// call authorizeJsonText.
+// call authorizeJSONText.
 //
 // authorizeSet evaluates the §9.3 multi-grant aggregation (rev CLC-1.3):
 //   - grants all absent (null or empty id) → deny capability_not_authorized
@@ -2276,7 +2298,7 @@ export function authorizeSet(
     // Step 1: validate the operation. The specific layer-1 code is propagated
     // (missing / unsupported_wildcard / invalid_capability_id).
     try {
-        validateCapabilityId(op.id);
+        validateCapabilityID(op.id);
     } catch (e) {
         return { verdict: VERDICT_DENY, reason: (e as SemanticsError).message };
     }
@@ -2758,4 +2780,1859 @@ export function containsWithDomains(
     const [cp2, r2] = normalizeForDomains(cp, childDm);
     if (r2) return { contains: false, reason: 'params_not_narrower' } as ContainmentResult;
     return contains({ ...parent, params: pp2 }, { ...child, params: cp2 });
+}
+
+
+// =============================================================================
+// Go-parity layer — 1:1 port of the Go reference implementation
+// (`register/semantics`, CLC-1.19).  Function names, argument order, reason
+// strings and layer precedence mirror the Go exports; only the error carrier
+// differs (Go returns `error`, this file throws SemanticsError).
+// =============================================================================
+
+
+// --- register/semantics/semantics.go: ValidateGrantParams / ---              |
+//     ValidateOperationParams / ConstraintWithin                              |
+
+// Go `ValidateGrantParams`: null-value check (§5.2) plus the §6.2 step 4 caps
+// on the decoded-object path (§6.2 step 6).
+export function validateGrantParams(params?: Record<string, unknown> | null): void {
+    validateParams(params);
+}
+
+// Go `ValidateOperationParams`: identical body to ValidateGrantParams — both
+// entry points MUST reject the caps.
+export function validateOperationParams(params?: Record<string, unknown> | null): void {
+    validateParams(params);
+}
+
+// Go `ConstraintWithin(value, bound) error`.
+//
+// Publication-boundary check: a rule's constraint value must not exceed the
+// signer's constraint value, using the same JSON subset semantic as §5.2
+// valueSubset.  A null bound is nominal (any value accepted); an explicitly
+// empty bound ({} or []) denies the class, exactly like §5.2.
+export function constraintWithin(value: unknown, bound: unknown): void {
+    if (value === null || value === undefined) {
+        throw new SemanticsError('invalid_params_null');
+    }
+    if (bound === null || bound === undefined) return;
+    const [ok, reason] = valueSubset(value, bound);
+    if (!ok) throw new SemanticsError(reason);
+}
+
+
+// --- register/semantics/obligations.go ---------------------------------------
+
+// §3 scheme grammar, shared with capability ids (P7: one definition, consumed
+// everywhere).  Mirrors Go's `capabilitySchemeRE`.
+const CAPABILITY_SCHEME_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9-]+-v[0-9]+$/;
+
+// Go `Obligations(d) []string` — an independent copy of the §8.4 obligation
+// list (empty for deny and for a fully evaluated allow).
+export function obligations(d: Decision): string[] {
+    return [...(d.unresolved ?? [])];
+}
+
+// Go `ConstraintIdentity(c) (string, error)` — the (scheme,type) identity of a
+// constraint.  A constraint that does not carry a parseable identity cannot be
+// dispatched to any evaluator, so it is reported as an unknown obligation
+// rather than passed along as text.
+export function constraintIdentity(c: string): string {
+    const parts = c.split(':');
+    if (parts.length < 2 || parts[0] === '' || parts[1] === '') {
+        throw new SemanticsError(`obligation_unknown: ${JSON.stringify(c)}`);
+    }
+    if (!CAPABILITY_SCHEME_RE.test(parts[0])) {
+        throw new SemanticsError(`obligation_unknown: ${JSON.stringify(c)}`);
+    }
+    for (const r of parts[1]) {
+        if (!/[A-Za-z0-9_-]/.test(r)) {
+            throw new SemanticsError(`obligation_unknown: ${JSON.stringify(c)}`);
+        }
+    }
+    return `${parts[0]}:${parts[1]}`;
+}
+
+// Go `ObligationIdentities(d) ([]string, error)` — the sorted, deduplicated
+// (scheme,type) identities of the decision's obligations.
+export function obligationIdentities(d: Decision): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const c of obligations(d)) {
+        const ident = constraintIdentity(c);
+        if (seen.has(ident)) continue;
+        seen.add(ident);
+        out.push(ident);
+    }
+    out.sort();
+    return out;
+}
+
+// Go `checkDecisionShape(d) error` — enforces the §8.4 relation between the
+// verdict and the obligation list.
+export function checkDecisionShape(d: Decision): void {
+    const ids = obligationIdentities(d);
+    if (d.verdict === VERDICT_ALLOW || d.verdict === VERDICT_DENY) {
+        if (ids.length > 0) {
+            throw new SemanticsError(`obligation_shape: verdict ${d.verdict} carries obligations ${JSON.stringify(ids)}`);
+        }
+    } else if (d.verdict === VERDICT_ALLOW_UNRESOLVED) {
+        if (ids.length === 0) {
+            throw new SemanticsError('obligation_shape: allow_unresolved without obligations');
+        }
+    } else {
+        throw new SemanticsError(`obligation_shape: unknown verdict ${JSON.stringify(d.verdict)}`);
+    }
+}
+
+// Go `Discharge(d, understood) error` — whether a consumer may act.
+//
+// A decision with no obligations always discharges.  Every obligation on an
+// allow_unresolved decision must be covered by `understood`; otherwise the
+// consumer must deny (XACML §2.13).
+export function discharge(d: Decision, understood: string[]): void {
+    const ids = obligationIdentities(d);
+    checkDecisionShape(d);
+    if (d.verdict !== VERDICT_ALLOW_UNRESOLVED) return;
+    const have = new Set(understood);
+    for (const ident of ids) {
+        if (!have.has(ident)) {
+            throw new SemanticsError(
+                `obligation_unknown: ${ident} (the consumer must understand, can and will discharge it)`);
+        }
+    }
+}
+
+
+// --- register/semantics/combine.go -------------------------------------------
+
+export const COMBINING_DENY_OVERRIDES = 'deny-overrides';
+export const COMBINING_PERMIT_OVERRIDES = 'permit-overrides';
+export const COMBINING_FIRST_APPLICABLE = 'first-applicable';
+export const DEFAULT_COMBINING_ALGORITHM = COMBINING_DENY_OVERRIDES;
+
+const COMBINING_ALGORITHMS = new Set([
+    COMBINING_DENY_OVERRIDES,
+    COMBINING_PERMIT_OVERRIDES,
+    COMBINING_FIRST_APPLICABLE,
+]);
+
+function hasObligations(decisions: Decision[]): boolean {
+    return decisions.some((d) => (d.unresolved ?? []).length > 0);
+}
+
+function combineDenyOverrides(decisions: Decision[]): Decision {
+    let collected: string[] = [];
+    let sawAllow = false;
+    for (const d of decisions) {
+        if (d.verdict === VERDICT_DENY) {
+            // Deny wins outright; its reason is the reported one.
+            return { verdict: VERDICT_DENY, reason: d.reason ?? '' };
+        }
+        if (d.verdict === VERDICT_ALLOW_UNRESOLVED) {
+            collected = collected.concat(obligations(d));
+        } else if (d.verdict === VERDICT_ALLOW) {
+            sawAllow = true;
+        }
+    }
+    if (collected.length > 0) {
+        return { verdict: VERDICT_ALLOW_UNRESOLVED, unresolved: [...new Set(collected)].sort() };
+    }
+    if (sawAllow) return { verdict: VERDICT_ALLOW };
+    // Unreachable while the verdict set is closed, but the fallback must not
+    // be allow.
+    return { verdict: VERDICT_DENY, reason: 'capability_not_authorized' };
+}
+
+function combinePermitOverrides(decisions: Decision[]): Decision {
+    let collected: string[] = [];
+    let firstDeny: Decision | null = null;
+    for (let i = 0; i < decisions.length; i++) {
+        const d = decisions[i];
+        if (d.verdict === VERDICT_ALLOW) {
+            // A later allow would drop the obligations already collected.
+            if (collected.length > 0 || hasObligations(decisions.slice(i + 1))) {
+                throw new SemanticsError('combining_would_drop_obligations');
+            }
+            return { verdict: VERDICT_ALLOW };
+        }
+        if (d.verdict === VERDICT_ALLOW_UNRESOLVED) {
+            collected = collected.concat(obligations(d));
+        } else if (d.verdict === VERDICT_DENY) {
+            if (firstDeny === null) firstDeny = d;
+        }
+    }
+    if (firstDeny !== null) {
+        return { verdict: VERDICT_DENY, reason: firstDeny.reason ?? '' };
+    }
+    if (collected.length > 0) {
+        return { verdict: VERDICT_ALLOW_UNRESOLVED, unresolved: [...new Set(collected)].sort() };
+    }
+    return { verdict: VERDICT_DENY, reason: 'capability_not_authorized' };
+}
+
+// Go `Combine(alg, decisions...) (Decision, error)`.
+//
+// Applies a named combining algorithm to independently decided sources.
+// Every decision must satisfy the §8.4 shape; a malformed one fails closed.
+export function combine(algorithm: string, decisions: Decision[]): Decision {
+    if (!COMBINING_ALGORITHMS.has(algorithm)) {
+        throw new SemanticsError(`unknown_combining_algorithm: ${JSON.stringify(algorithm)}`);
+    }
+    if (decisions.length === 0) {
+        throw new SemanticsError('no_decisions');
+    }
+    for (let i = 0; i < decisions.length; i++) {
+        try {
+            checkDecisionShape(decisions[i]);
+        } catch (e) {
+            if (e instanceof Error) throw new SemanticsError(`decision ${i}: ${e.message}`);
+            throw e;
+        }
+    }
+    if (algorithm === COMBINING_FIRST_APPLICABLE) return decisions[0];
+    if (algorithm === COMBINING_PERMIT_OVERRIDES) return combinePermitOverrides(decisions);
+    return combineDenyOverrides(decisions);
+}
+
+
+// --- register/semantics/evidence.go ------------------------------------------
+
+export const EVIDENCE_SCHEME = 'varwof/evidence-v1';
+export const EVIDENCE_FRESHNESS = `${EVIDENCE_SCHEME}:freshness`;
+export const EVIDENCE_CONSUMPTION = `${EVIDENCE_SCHEME}:consumption`;
+export const EVIDENCE_QUORUM = `${EVIDENCE_SCHEME}:quorum`;
+export const EVIDENCE_EXCLUSION = `${EVIDENCE_SCHEME}:exclusion`;
+
+// Bounds max_age_sec so the seconds arithmetic below cannot wrap.  An absurdly
+// large age is a grammar error, not a wrap-around freshness answer.
+export const MAX_EVIDENCE_AGE_SECONDS = 1_000_000_000; // ~31.7 years
+
+export const EVIDENCE_SATISFIED = 'satisfied';
+export const EVIDENCE_VIOLATED = 'violated';
+export const EVIDENCE_UNKNOWN = 'unknown';
+
+export type EvidenceVerdict = typeof EVIDENCE_SATISFIED | typeof EVIDENCE_VIOLATED | typeof EVIDENCE_UNKNOWN;
+
+// Go `EvidenceFact` — one natively verified artifact reduced to the fields the
+// core may evaluate over.  Presenter labels are not represented at all, so they
+// cannot be counted by accident.
+export interface EvidenceFact {
+    type: string;
+    subject: string;
+    issued_at: string;
+    verified: boolean;
+}
+
+// Go `EvidenceContext` — the inputs the core does not read for itself.
+export interface GoEvidenceContext {
+    now?: string;
+    initiator?: string;
+    executor?: string;
+}
+
+export interface EvidenceEvaluation {
+    constraint: string;
+    verdict: EvidenceVerdict;
+    reason?: string;
+}
+
+// RFC 8785 / RATS instants are RFC3339 *with* an offset.  A naive (offset-less)
+// stamp is not an instant — Go rejects it at unmarshal time.
+const UTC_Z_RE = /Z$/;
+
+function isUTCInstantString(s: unknown): boolean {
+    if (typeof s !== 'string') return false;
+    return UTC_Z_RE.test(s);
+}
+
+
+function parseRFC3339(s?: string | null): Date | null {
+    if (!s || typeof s !== 'string') return null;
+    if (!RFC3339_RE.test(s)) return null;
+    const t = Date.parse(s);
+    return Number.isNaN(t) ? null : new Date(t);
+}
+
+// Go's zero `time.Time` (year 1).  A context that pinned no clock reads as this
+// instant, which is how the freshness comparisons below fail closed.
+const ZERO_TIME = new Date(-62135596800000);
+
+// Go `ValidateEvidenceConstraint(c) error` — the closed value grammar of the
+// four evidence-side types.  An unrecognized (scheme,type) is an error, never a
+// silent pass.
+export function validateEvidenceConstraint(c: string): void {
+    const parts = c.split(':');
+    if (parts.length < 2) {
+        throw new SemanticsError(`invalid_evidence_constraint: ${JSON.stringify(c)}`);
+    }
+    const identity = `${parts[0]}:${parts[1]}`;
+    if (identity === EVIDENCE_FRESHNESS) {
+        if (parts.length !== 4 || parts[2] !== 'sec') {
+            throw new SemanticsError(
+                `invalid_evidence_constraint: ${JSON.stringify(c)} (want ${EVIDENCE_SCHEME}:freshness:sec:<n>)`);
+        }
+        if (!isStrictJSONInteger(parts[3])) {
+            throw new SemanticsError(
+                `invalid_evidence_constraint: ${JSON.stringify(c)} (max age must be a non-negative integer)`);
+        }
+        if (Number(parts[3]) > MAX_EVIDENCE_AGE_SECONDS) {
+            throw new SemanticsError(
+                `invalid_evidence_constraint: ${JSON.stringify(c)} (max age exceeds ${MAX_EVIDENCE_AGE_SECONDS} seconds)`);
+        }
+    } else if (identity === EVIDENCE_CONSUMPTION) {
+        if (parts.length !== 3 || parts[2] !== 'once') {
+            throw new SemanticsError(
+                `invalid_evidence_constraint: ${JSON.stringify(c)} (want ${EVIDENCE_SCHEME}:consumption:once)`);
+        }
+    } else if (identity === EVIDENCE_QUORUM) {
+        if (parts.length !== 4 || parts[2] !== 'distinct') {
+            throw new SemanticsError(
+                `invalid_evidence_constraint: ${JSON.stringify(c)} (want ${EVIDENCE_SCHEME}:quorum:distinct:<n>)`);
+        }
+        if (!isStrictJSONInteger(parts[3]) || Number(parts[3]) < 2) {
+            throw new SemanticsError(
+                `invalid_evidence_constraint: ${JSON.stringify(c)} (a quorum is greater than one)`);
+        }
+    } else if (identity === EVIDENCE_EXCLUSION) {
+        if (parts.length !== 3 || (parts[2] !== 'initiator' && parts[2] !== 'executor')) {
+            throw new SemanticsError(
+                `invalid_evidence_constraint: ${JSON.stringify(c)} (want ${EVIDENCE_SCHEME}:exclusion:initiator|executor)`);
+        }
+    } else {
+        throw new SemanticsError(`invalid_evidence_constraint: ${JSON.stringify(c)}`);
+    }
+}
+
+// Go `eligible` — keeps the facts a verifier actually established
+// (AEC §9.4.f: only eligible components contribute).
+function evidenceEligible(facts: EvidenceFact[]): EvidenceFact[] {
+    return facts.filter((f) => f.verified === true);
+}
+
+// Go `distinctSubjects` — counts integrity-protected subject identifiers.  An
+// empty subject is ineligible.
+function distinctSubjects(facts: EvidenceFact[]): Set<string> {
+    const out = new Set<string>();
+    for (const f of evidenceEligible(facts)) {
+        if (f.subject) out.add(f.subject);
+    }
+    return out;
+}
+
+// Go `EvaluateEvidenceConstraint(c, facts, ctx) (EvidenceEvaluation, error)`.
+//
+// Evaluates one evidence constraint over the eligible facts of a single
+// evidence role.  A malformed constraint throws; a recognized-but-external one
+// returns verdict=unknown with reason `evidence_not_core_evaluated`.
+export function evaluateEvidenceConstraint(
+    c: string,
+    facts: EvidenceFact[],
+    ctx: GoEvidenceContext = {},
+): EvidenceEvaluation {
+    validateEvidenceConstraint(c);
+    const parts = c.split(':');
+    const identity = `${parts[0]}:${parts[1]}`;
+    const out: EvidenceEvaluation = { constraint: c, verdict: EVIDENCE_SATISFIED };
+
+    if (identity === EVIDENCE_FRESHNESS) {
+        const maxAge = Number(parts[3]) * 1000;
+        // Go takes `ctx.Now` from the caller; an absent clock reads as the zero
+        // instant, which makes any real issuance "future" — fail closed, never
+        // a silent pass.
+        const now = parseRFC3339(ctx.now) ?? ZERO_TIME;
+        const fs = evidenceEligible(facts);
+        for (const f of fs) {
+            const t = parseRFC3339(f.issued_at);
+            if (t === null) {
+                out.verdict = EVIDENCE_VIOLATED; out.reason = 'freshness:no_issuance_time'; return out;
+            }
+            if (t > now) {
+                out.verdict = EVIDENCE_VIOLATED; out.reason = 'freshness:future_issued'; return out;
+            }
+            if (now.getTime() - t.getTime() > maxAge) {
+                out.verdict = EVIDENCE_VIOLATED; out.reason = 'freshness:stale'; return out;
+            }
+        }
+        if (fs.length === 0) {
+            // Nothing eligible to be fresh: the requirement is unfilled.
+            out.verdict = EVIDENCE_VIOLATED; out.reason = 'freshness:no_eligible_fact'; return out;
+        }
+        return out;
+    }
+
+    if (identity === EVIDENCE_QUORUM) {
+        const threshold = Number(parts[3]);
+        const distinct = distinctSubjects(facts);
+        if (distinct.size < threshold) {
+            out.verdict = EVIDENCE_VIOLATED;
+            out.reason = `quorum:distinct_subjects=${distinct.size}<threshold=${threshold}`;
+            return out;
+        }
+        return out;
+    }
+
+    if (identity === EVIDENCE_EXCLUSION) {
+        const who = parts[2];
+        const excluded = who === 'initiator' ? ctx.initiator : ctx.executor;
+        if (!excluded) {
+            // The boundary-owned identity was not supplied.  Absence is never
+            // "not excluded": exclusion cannot be established, so it is unknown.
+            out.verdict = EVIDENCE_UNKNOWN; out.reason = 'exclusion:identity_not_supplied'; return out;
+        }
+        for (const subject of distinctSubjects(facts)) {
+            if (subject === excluded) {
+                out.verdict = EVIDENCE_VIOLATED; out.reason = `exclusion:${who}_is_approver`; return out;
+            }
+        }
+        return out;
+    }
+
+    // evidenceConsumption: durable one-time state lives at the enforcement
+    // point; the core must not answer it.  Reported as a residual obligation,
+    // never as satisfied.
+    out.verdict = EVIDENCE_UNKNOWN;
+    out.reason = 'evidence_not_core_evaluated';
+    return out;
+}
+
+// Go `CoreEvaluatesEvidenceConstraint(c) bool` — whether this revision has an
+// evaluator for the constraint.  Unrecognized constraints report false.
+export function coreEvaluatesEvidenceConstraint(c: string): boolean {
+    try {
+        validateEvidenceConstraint(c);
+    } catch {
+        return false;
+    }
+    const parts = c.split(':');
+    return `${parts[0]}:${parts[1]}` !== EVIDENCE_CONSUMPTION;
+}
+
+// Go `EvidenceFactsOfRole(facts, role) []EvidenceFact` — selects the facts
+// filling one evidence role; callers scope first and evaluate second.
+export function evidenceFactsOfRole(facts: EvidenceFact[], role: string): EvidenceFact[] {
+    return facts.filter((f) => f.type === role);
+}
+
+
+// --- register/semantics/record.go --------------------------------------------
+//
+// Representation note: Go carries `Digest.Value` as `[]byte`, which
+// json.Marshal renders as standard base64 with padding.  This port therefore
+// carries the digest value as that same base64 text, so a canonical
+// re-encoding of a record is byte-identical to Go's and round-trips without a
+// lossy bytes<->string step.
+
+export const RECORD_LANG = 'clc-v1';
+export const DIGEST_ALG_SHA256 = 'sha-256';
+
+export interface Digest {
+    alg: string;
+    value: string;
+}
+
+// Go `Digest` — a hash over a canonical byte string.  `value` is the
+// standard-base64 text of the digest bytes.
+export function digest(alg: string = DIGEST_ALG_SHA256, value = ''): Digest {
+    return { alg, value };
+}
+
+// Go `(Digest) Equal(o)`.
+export function digestEqual(d: Digest | undefined | null, other: Digest | undefined | null): boolean {
+    return (d?.alg ?? '') === (other?.alg ?? '') && (d?.value ?? '') === (other?.value ?? '');
+}
+
+// Go `DigestOf(v) (Digest, error)` — the SHA-256 of v's canonical (JCS,
+// RFC 8785) JSON encoding.
+export function digestOf(value: unknown): Digest {
+    const raw = Buffer.from(canonicalJSON(value), 'utf8');
+    return { alg: DIGEST_ALG_SHA256, value: createHash('sha256').update(raw).digest('base64') };
+}
+
+// Go `DigestOfCanonical(canonical []byte) Digest` — hashes bytes already known
+// to be canonical, so Record does not encode the inputs twice.
+export function digestOfCanonical(canonical: string | Uint8Array): Digest {
+    const raw = typeof canonical === 'string' ? Buffer.from(canonical, 'utf8') : Buffer.from(canonical);
+    return { alg: DIGEST_ALG_SHA256, value: createHash('sha256').update(raw).digest('base64') };
+}
+
+// Go `digestUsable(d) bool` — an algorithm tag and a non-empty value.
+export function digestUsable(d?: Digest | null): d is Digest {
+    return !!d && !!d.alg && !!d.value;
+}
+
+function digestHex(value: unknown): string {
+    // Go's `hex.EncodeToString(d.Value)`.  A value that is not decodable
+    // base64 is keyed literally: it can never equal a valid digest's key, so a
+    // malformed digest stays refused rather than silently colliding with a
+    // real one.
+    if (typeof value !== 'string' || value === '') return String(value ?? '');
+    try {
+        // Node's base64 decoder accepts both the standard and the urlsafe
+        // alphabet, so hex-identical digests key identically regardless of
+        // which spelling produced them.
+        const raw = Buffer.from(value, 'base64');
+        const want = value.replace(/=+$/, '');
+        if (raw.toString('base64').replace(/=+$/, '') !== want &&
+            raw.toString('base64url').replace(/=+$/, '') !== want) {
+            // A stray non-alphabet character would have been silently
+            // discarded; refuse the value instead of letting two digests share
+            // a key.
+            return value;
+        }
+        return raw.toString('hex');
+    } catch {
+        return value;
+    }
+}
+
+// Go `digestKey(d) string` — `alg + ":" + hex(value)`.
+export function digestKey(d?: Digest | null): string {
+    return `${d?.alg ?? ''}:${digestHex(d?.value)}`;
+}
+
+// Helper: build a Digest from the hex form used by in-toto subjects.
+export function digestFromHex(alg: string, hexvalue: string): Digest {
+    return { alg, value: Buffer.from(hexvalue, 'hex').toString('base64') };
+}
+
+
+// --- register/semantics/context.go -------------------------------------------
+
+// Go `EpochIDOf(v uint64) *uint64`.
+//
+// Go uses a pointer so a legitimate epoch id of zero is distinguishable from
+// "not used"; TypeScript carries that distinction as the literal `0` versus an
+// absent key, so the function is an identity with the documented contract.
+export function epochIDOf(v: number): number {
+    return v;
+}
+
+export interface DecisionContext {
+    at?: string;
+    max_age_sec?: number;
+    nonce?: string;
+    epoch_id?: number;
+    snapshot_digest?: Digest;
+}
+
+export function decisionContext(
+    at = '', maxAgeSec = 0, nonce = '',
+    epochId?: number, snapshotDigest?: Digest,
+): DecisionContext {
+    const ctx: DecisionContext = { at, max_age_sec: maxAgeSec, nonce };
+    if (epochId !== undefined) ctx.epoch_id = epochId;
+    if (snapshotDigest !== undefined) ctx.snapshot_digest = snapshotDigest;
+    return ctx;
+}
+
+// Bounds a nonce the same way §6.2 bounds other inputs, so a hostile peer
+// cannot inflate the record.
+export const MAX_CONTEXT_NONCE_BYTES = 512;
+
+// Go `(DecisionContext) IsZero() bool` — pins no freshness mechanism.
+export function contextIsZero(ctx: DecisionContext): boolean {
+    // `At` is a `time.Time`, so Go's JSON encoding always writes it: a context
+    // that pinned no clock reads back as year 1's zero instant, which must not
+    // be mistaken for a pinned `at`.
+    const parsed = ctx.at ? parseRFC3339(ctx.at) : null;
+    const atIsZero = !ctx.at
+        ? true
+        : parsed !== null && parsed.getTime() === parseRFC3339(ZERO_TIME_INSTANT)!.getTime();
+    return atIsZero && !ctx.nonce && ctx.epoch_id === undefined;
+}
+
+// Go `(DecisionContext) Validate() error`.
+export function validateDecisionContext(ctx: DecisionContext): void {
+    if ((ctx.max_age_sec ?? 0) < 0) throw new SemanticsError('context_shape: negative max_age_sec');
+    if ((ctx.max_age_sec ?? 0) > 0 && !ctx.at) throw new SemanticsError('context_shape: max_age_sec without at');
+    if (contextIsZero(ctx)) throw new SemanticsError('context_missing');
+    if (ctx.at) {
+        const atp = parseRFC3339(ctx.at);
+        if (atp === null) {
+            throw new SemanticsError('context_not_utc: at carries an unparseable instant');
+        }
+        if (!isUTCInstantString(ctx.at)) {
+            throw new SemanticsError('context_not_utc: at carries location ');
+        }
+    }
+    if (ctx.snapshot_digest !== undefined && !digestUsable(ctx.snapshot_digest)) {
+        throw new SemanticsError('context_shape: incomplete snapshot digest');
+    }
+    if (ctx.nonce && Buffer.byteLength(ctx.nonce, 'utf8') > MAX_CONTEXT_NONCE_BYTES) {
+        throw new SemanticsError(`context_shape: nonce longer than ${MAX_CONTEXT_NONCE_BYTES} bytes`);
+    }
+}
+
+// Go `(DecisionContext) Fresh(now time.Time) error`.
+//
+// `now` is supplied by the caller (the core never reads a clock).  A context
+// that pinned only a nonce or an epoch id has no clock claim to check: this
+// throws `context_no_clock` rather than passing.
+export function freshContext(ctx: DecisionContext, now: string): void {
+    validateDecisionContext(ctx);
+    const at = parseRFC3339(ctx.at);
+    if (at === null) throw new SemanticsError('context_no_clock');
+    const when = parseRFC3339(now);
+    if (when === null) throw new SemanticsError('invalid_timestamp');
+    if (when < at) {
+        throw new SemanticsError(`context_future: context at ${ctx.at}, checking instant ${now}`);
+    }
+    const maxAge = ctx.max_age_sec ?? 0;
+    if (maxAge > 0) {
+        const age = (when.getTime() - at.getTime()) / 1000;
+        if (age > maxAge) throw new SemanticsError(`context_stale: age ${fmtDuration(age)} exceeds ${fmtDuration(maxAge)}`);
+    }
+}
+
+// Go `(DecisionContext) Digest() (Digest, error)` — binds the context so a
+// record can identify exactly which freshness input it was decided under.
+function durationFrac(value: number, base: number, digits: number): string {
+    if (value === 0) return '';
+    const whole = Math.floor(value / base);
+    const frac = value % base;
+    if (frac === 0) return String(whole);
+    return `${whole}.${String(frac).padStart(digits, '0').replace(/0+$/, '')}`;
+}
+
+// Go's `time.Duration.String()`: the reference prints an age or a bound in unit
+// form (`2m0s`, `1m0s`), never as a raw count of seconds.
+function fmtDuration(seconds: number): string {
+    let ns = Math.round(seconds * 1e9);
+    if (ns === 0) return '0s';
+    const neg = ns < 0;
+    if (neg) ns = -ns;
+    let body: string;
+    if (ns < 1e3) body = `${ns}ns`;
+    else if (ns < 1e6) body = `${durationFrac(ns, 1e3, 3)}µs`;
+    else if (ns < 1e9) body = `${durationFrac(ns, 1e6, 6)}ms`;
+    else {
+        const secs = Math.floor(ns / 1e9);
+        const frac = durationFrac(ns % 1e9, 1e9, 9);
+        if (secs < 60) body = `${secs}${frac}s`;
+        else if (secs < 3600) body = `${Math.floor(secs / 60)}m${secs % 60}${frac}s`;
+        else body = `${Math.floor(secs / 3600)}h${Math.floor(secs % 3600 / 60)}m${secs % 60}${frac}s`;
+    }
+    return neg ? `-${body}` : body;
+}
+
+// Go's `DecisionContext` JSON.  `At` is a `time.Time` struct, which
+// encoding/json never omits, so a context without a pinned instant still
+// carries year 1's zero time.
+export const ZERO_TIME_INSTANT = '0001-01-01T00:00:00Z';
+
+export function contextWire(ctx: DecisionContext): DecisionContext {
+    const out: DecisionContext = { ...ctx, at: ctx.at || ZERO_TIME_INSTANT };
+    if (!out.max_age_sec) delete out.max_age_sec;
+    if (!out.nonce) delete out.nonce;
+    if (out.epoch_id === undefined) delete out.epoch_id;
+    if (out.snapshot_digest === undefined) delete out.snapshot_digest;
+    return out;
+}
+
+export function contextDigest(ctx: DecisionContext): Digest {
+    validateDecisionContext(ctx);
+    return digestOf(contextWire(ctx));
+}
+
+
+// --- register/semantics/sources.go -------------------------------------------
+
+export interface SourceRef {
+    kind: string;
+    id: string;
+    issuer?: string;
+    digest: Digest;
+    references?: Digest[];
+}
+
+export interface SourceLink {
+    from: Digest;
+    to: Digest;
+}
+
+export interface SourceChain {
+    sources: SourceRef[];
+    links?: SourceLink[];
+}
+
+function referencesDigest(refs: Digest[] | undefined, want: Digest): boolean {
+    return (refs ?? []).some((r) => digestEqual(r, want));
+}
+
+function detectCycle(byDigest: Map<string, SourceRef>, edges: Map<string, string[]>): void {
+    const WHITE = 0, GREY = 1, BLACK = 2;
+    const color = new Map<string, number>();
+
+    const visit = (node: string): void => {
+        color.set(node, GREY);
+        for (const nxt of edges.get(node) ?? []) {
+            const state = color.get(nxt) ?? WHITE;
+            if (state === GREY) throw new SemanticsError(`source_chain_cycle: ${byDigest.get(nxt)?.id}`);
+            if (state === WHITE) visit(nxt);
+        }
+        color.set(node, BLACK);
+    };
+
+    for (const node of edges.keys()) {
+        if ((color.get(node) ?? WHITE) === WHITE) visit(node);
+    }
+}
+
+// Go `(SourceChain) Validate() error` — the chain's structure and, in
+// particular, that every claimed relation is backed by the source's own
+// references.
+export function validateSourceChain(chain: SourceChain): void {
+    const sources = chain.sources ?? [];
+    if (sources.length === 0) throw new SemanticsError('source_chain_empty');
+    const byDigest = new Map<string, SourceRef>();
+    for (const s of sources) {
+        if (!s.kind || !s.id) {
+            throw new SemanticsError(`source_shape: kind/id required (got "${s.kind ?? ''}"/"${s.id ?? ''}")`);
+        }
+        if (!digestUsable(s.digest)) {
+            throw new SemanticsError(`source_shape: source ${s.kind}/${s.id} has no usable digest`);
+        }
+        const key = digestKey(s.digest);
+        if (byDigest.has(key)) throw new SemanticsError(`source_duplicate: ${key}`);
+        byDigest.set(key, s);
+    }
+
+    const edges = new Map<string, string[]>();
+    for (const l of chain.links ?? []) {
+        const fromKey = digestKey(l.from), toKey = digestKey(l.to);
+        const src = byDigest.get(fromKey), dst = byDigest.get(toKey);
+        if (!src || !dst) throw new SemanticsError(`source_dangling_link: ${fromKey} -> ${toKey}`);
+        if (!referencesDigest(src.references, dst.digest)) {
+            throw new SemanticsError(`source_edge_unbacked: ${src.id} does not name ${dst.id}`);
+        }
+        if (!edges.has(fromKey)) edges.set(fromKey, []);
+        edges.get(fromKey)!.push(toKey);
+    }
+
+    detectCycle(byDigest, edges);
+}
+
+// Go `(SourceChain) Digest() (Digest, error)` — the sorted node identities plus
+// the sorted links, hashed, never the inline material.
+export function sourceChainDigest(chain: SourceChain): Digest {
+    validateSourceChain(chain);
+    // Go builds `nodeID{kind,id,alg,hex(value)}` and sorts on the hex value, so
+    // the sort key and the hashed bytes are both hex here.
+    const nodes = (chain.sources ?? []).map((s) => ({
+        kind: s.kind, id: s.id, alg: s.digest.alg, value: digestHex(s.digest.value),
+    }));
+    nodes.sort((a, b) =>
+        a.kind < b.kind ? -1 : a.kind > b.kind ? 1 :
+        a.id < b.id ? -1 : a.id > b.id ? 1 :
+        a.value < b.value ? -1 : a.value > b.value ? 1 : 0);
+    const links = (chain.links ?? [])
+        .map((l) => `${digestKey(l.from)}->${digestKey(l.to)}`)
+        .sort();
+    const payload: Record<string, unknown> = { sources: nodes };
+    if (links.length > 0) payload.links = links;
+    return digestOf(payload);
+}
+
+// Go `(SourceChain) StandingOn(from Digest) ([]SourceRef, error)`.
+//
+// The walk follows the "artifact names authority" direction, so it returns the
+// artifact first and ends at a source that names nothing.  A source that names
+// more than one other source in the chain has no single path.
+export function standingOn(chain: SourceChain, from: Digest): SourceRef[] {
+    validateSourceChain(chain);
+    const byDigest = new Map<string, SourceRef>();
+    for (const s of chain.sources) byDigest.set(digestKey(s.digest), s);
+    const named = new Map<string, SourceRef[]>();
+    for (const l of chain.links ?? []) {
+        const fromKey = digestKey(l.from), toKey = digestKey(l.to);
+        if (!named.has(fromKey)) named.set(fromKey, []);
+        named.get(fromKey)!.push(byDigest.get(toKey)!);
+    }
+
+    let key = digestKey(from);
+    if (!byDigest.has(key)) throw new SemanticsError(`source_dangling_link: ${key}`);
+    let current = byDigest.get(key)!;
+    const path: SourceRef[] = [];
+    const seen = new Set<string>();
+    for (;;) {
+        key = digestKey(current.digest);
+        if (seen.has(key)) throw new SemanticsError(`source_chain_cycle: ${current.id}`);
+        seen.add(key);
+        path.push(current);
+        const next = named.get(key) ?? [];
+        if (next.length === 0) return path;
+        if (next.length === 1) { current = next[0]; continue; }
+        throw new SemanticsError(`source_chain_branch: ${current.id} names ${next.length} sources`);
+    }
+}
+
+
+// --- register/semantics/record.go (record construction) ----------------------
+
+export interface RecordInputs {
+    grants: Grant[];
+    operations: Operation[];
+    context?: DecisionContext;
+    sources?: SourceChain;
+    requirement_digest?: Digest;
+}
+
+export interface DecisionRecord {
+    ver: string;
+    lang: string;
+    inputs: RecordInputs;
+    input_digest: Digest;
+    verdict: string;
+    reason?: string;
+    // `RecordConstraints.Unresolved` is `,omitempty`: an empty residual
+    // channel writes as `{}` and never as `{"unresolved": []}`.
+    constraints: { unresolved?: string[] };
+}
+
+export interface RecordOptions {
+    context?: DecisionContext;
+    sources?: SourceChain;
+    requirement?: Requirement;
+}
+
+// Go `RecordInputs` — the frozen input of a decision.  The field names are the
+// record's public schema, not an internal detail.
+// Go's `Grant` JSON: only the declared members exist, and the optional ones
+// carry `,omitempty`, so a null or empty `params` is not written at all.  The
+// record hashes the bytes a Go holder would have written.
+function grantWire(g: Grant): Grant {
+    const out: Grant = { id: g.id ?? '' };
+    if (g.params) out.params = g.params;
+    if (g.param_bounds) out.param_bounds = g.param_bounds;
+    if (g.constraints && g.constraints.length) out.constraints = [...g.constraints];
+    return out;
+}
+
+function operationWire(op: Operation): Operation {
+    const out: Operation = { id: op.id ?? '' };
+    if (op.params) out.params = op.params;
+    return out;
+}
+
+function digestWire(d?: Digest | null): Digest {
+    return { alg: d?.alg ?? '', value: d?.value } as Digest;
+}
+
+function refWire(r: SourceRef): SourceRef {
+    const out: SourceRef = { kind: r.kind ?? '', id: r.id ?? '', digest: digestWire(r.digest) } as SourceRef;
+    if (r.issuer) out.issuer = r.issuer;
+    if (r.references && r.references.length) out.references = r.references.map(digestWire);
+    return out;
+}
+
+function sourcesWire(ch: SourceChain): SourceChain {
+    const out: SourceChain = { sources: (ch.sources ?? []).map(refWire) } as SourceChain;
+    if (ch.links && ch.links.length) {
+        out.links = ch.links.map((l) => ({ from: digestWire(l.from), to: digestWire(l.to) }));
+    }
+    return out;
+}
+
+export function recordInputs(
+    grants: Grant[], op: Operation,
+    context?: DecisionContext, sources?: SourceChain, requirementDigest?: Digest,
+): RecordInputs {
+    const out: RecordInputs = {
+        grants: grants.map(grantWire), operations: [operationWire(op)],
+    };
+    if (context !== undefined) out.context = contextWire(context);
+    if (sources !== undefined) out.sources = sourcesWire(sources);
+    if (requirementDigest !== undefined) out.requirement_digest = requirementDigest;
+    return out;
+}
+
+// Go `record(grants, op, opts, requirementDigest) (DecisionRecord, error)`.
+//
+// The verdict/reason/unresolved are copied from AuthorizeSet unchanged, never
+// recomputed or reworded here.
+function buildRecord(
+    grants: Grant[], op: Operation,
+    context?: DecisionContext, sources?: SourceChain,
+    requirement?: Requirement,
+): DecisionRecord {
+    // Normalize before encoding: a null slice would encode as null and then
+    // hash differently from the empty list it decodes back to.
+    const g: Grant[] = grants ?? [];
+    const reqDigest = requirement !== undefined ? requirementDigest(requirement) : undefined;
+    const inputs = recordInputs(g, op, context, sources, reqDigest);
+    const canonical = canonicalJSON(inputs);
+    const frozen = JSON.parse(canonical) as RecordInputs;
+    if (!frozen.grants) frozen.grants = [];
+
+    const rec: DecisionRecord = {
+        ver: CLC_REVISION,
+        lang: RECORD_LANG,
+        inputs: frozen,
+        input_digest: digestOfCanonical(canonical),
+        verdict: '',
+        constraints: {},
+    };
+    const decision = authorizeSet(frozen.grants, frozen.operations[0]);
+    rec.verdict = decision.verdict;
+    if (decision.reason) rec.reason = decision.reason;
+    rec.constraints = (decision.unresolved ?? []).length
+        ? { unresolved: [...(decision.unresolved ?? [])] } : {};
+    return rec;
+}
+
+// Go `RecordWith(grants, op, opts) (DecisionRecord, error)`.
+//
+// Both the freshness context and the authorization source chain are validated
+// before anything is written: a chain whose claimed relations its own bytes do
+// not back is refused, not recorded.
+export function recordWith(grants: Grant[], op: Operation, opts: RecordOptions = {}): DecisionRecord {
+    if (opts.context !== undefined) validateDecisionContext(opts.context);
+    if (opts.sources !== undefined) validateSourceChain(opts.sources);
+    return buildRecord(grants, op, opts.context, opts.sources, opts.requirement);
+}
+
+// Go `Record(grants, op) (DecisionRecord, error)`.
+export function record(grants: Grant[], op: Operation): DecisionRecord {
+    return recordWith(grants, op);
+}
+
+// Go `RecordWithContext(grants, op, ctx) (DecisionRecord, error)`.
+export function recordWithContext(grants: Grant[], op: Operation, ctx: DecisionContext): DecisionRecord {
+    return recordWith(grants, op, { context: ctx });
+}
+
+// Go `(DecisionRecord) CanonicalBytes() ([]byte, error)` — the stable handle a
+// later step signs, or compares between implementations.
+export function recordCanonicalBytes(rec: DecisionRecord): string {
+    return canonicalJSON(rec);
+}
+
+// Go `(DecisionRecord) Recompute() (Decision, error)` — re-runs the language
+// over the record's frozen inputs.  It needs nothing outside the record.
+export function recordRecompute(rec: DecisionRecord): Decision {
+    const operations = rec.inputs?.operations ?? [];
+    if (operations.length !== 1) {
+        throw new SemanticsError(`record_operation_count: ${operations.length} operations`);
+    }
+    if (!revisionCompatible(rec.ver)) {
+        throw new SemanticsError(`record_unsupported_revision: ${rec.ver}`);
+    }
+    return authorizeSet(rec.inputs.grants ?? [], operations[0]);
+}
+
+// Go `(DecisionRecord) Verify() error` — the digest must match the frozen
+// inputs, and re-running the language must reproduce the verdict, reason and
+// residual obligations byte for byte.
+export function recordVerify(rec: DecisionRecord): void {
+    const recomputed = recordRecompute(rec);
+    const want = digestOf(rec.inputs);
+    const recorded = rec.input_digest ?? { alg: '', value: '' };
+    if (!digestEqual(want, recorded)) {
+        throw new SemanticsError(
+            `record_input_digest_mismatch: recorded ${recorded.alg}/${recorded.value}, ` +
+            `recomputed ${want.alg}/${want.value}`);
+    }
+    if (recomputed.verdict !== rec.verdict || (recomputed.reason ?? '') !== (rec.reason ?? '')) {
+        throw new SemanticsError(
+            `record_verdict_mismatch: recorded ${JSON.stringify(rec.verdict)}/${JSON.stringify(rec.reason)}, ` +
+            `recomputed ${JSON.stringify(recomputed.verdict)}/${JSON.stringify(recomputed.reason)}`);
+    }
+    const got = [...(rec.constraints?.unresolved ?? [])];
+    const wantUnresolved = [...(recomputed.unresolved ?? [])];
+    if (got.length !== wantUnresolved.length || got.some((v, i) => v !== wantUnresolved[i])) {
+        throw new SemanticsError(
+            `record_verdict_mismatch: recorded unresolved ${JSON.stringify(got)}, ` +
+            `recomputed ${JSON.stringify(wantUnresolved)}`);
+    }
+}
+
+// Go `(DecisionRecord) VerifyAsOf(now) error` — additionally requires the
+// decision context to still be fresh at `now` (RATS §10).
+export function recordVerifyAsOf(rec: DecisionRecord, now: string): void {
+    recordVerify(rec);
+    const ctx = rec.inputs?.context;
+    if (!ctx) throw new SemanticsError('context_missing');
+    freshContext(ctx, now);
+}
+
+
+// --- register/semantics/requirement.go ---------------------------------------
+
+export const REQUIREMENT_VERSION = 'CLC-REQUIREMENT-v1';
+
+export const MAX_REQUIREMENT_EXPRESSION_BYTES = 512;
+export const MAX_REQUIREMENT_NODES = 64;
+export const MAX_REQUIREMENT_DEPTH = 8;
+
+// Reason codes that are not already carried by a constraint evaluation.
+export const SATISFACTION_REASON_EXPRESSION_FALSE = 'requirement:expression_false';
+export const SATISFACTION_REASON_UNSATISFIED = 'requirement:unsatisfied';
+
+export const SATISFACTION_SATISFIED = 'SATISFIED';
+export const SATISFACTION_UNSATISFIED = 'UNSATISFIED';
+
+export interface Requirement {
+    '@version': string;
+    requirement_id: string;
+    purpose?: string;
+    expression: string;
+    constraints?: Array<{ role: string; constraint: string }>;
+}
+
+export interface RequirementResult {
+    requirement_id?: string;
+    digest: Digest;
+    verdict: EvidenceVerdict;
+    expression: boolean;
+    missing_roles?: string[];
+    constraints?: EvidenceEvaluation[];
+}
+
+const REQUIREMENT_KNOWN_MEMBERS = new Set([
+    '@version', 'requirement_id', 'purpose', 'expression', 'constraints',
+]);
+
+// Go `isIdentByte` — letters, digits and the separators . : - _.
+function isIdentByte(c: number): boolean {
+    if ((c >= 0x61 && c <= 0x7A) || (c >= 0x41 && c <= 0x5A) || (c >= 0x30 && c <= 0x39)) return true;
+    return c === 0x2E || c === 0x3A || c === 0x2D || c === 0x5F;
+}
+
+// Go `tokenizeRequirement`.
+function tokenizeRequirement(src: string): string[] {
+    const tokens: string[] = [];
+    const data = Buffer.from(src, 'utf8');
+    let i = 0;
+    const n = data.length;
+    while (i < n) {
+        const c = data[i];
+        if (c === 0x20 || c === 0x09 || c === 0x0A || c === 0x0D) {
+            i++;
+        } else if (c === 0x28 || c === 0x29) { // ( )
+            tokens.push(String.fromCharCode(c));
+            i++;
+        } else if (c === 0x26 || c === 0x7C) { // & |
+            // The grammar's symbolic operators are doubled; a single one is not
+            // a token.
+            if (i + 1 >= n || data[i + 1] !== c) {
+                throw new SemanticsError(`requirement_expression: stray ${JSON.stringify(String.fromCharCode(c))}`);
+            }
+            tokens.push(String.fromCharCode(c).repeat(2));
+            i += 2;
+        } else if (isIdentByte(c)) {
+            const start = i;
+            while (i < n && isIdentByte(data[i])) i++;
+            tokens.push(data.subarray(start, i).toString('utf8'));
+        } else {
+            throw new SemanticsError(`requirement_expression: unexpected character ${JSON.stringify(String.fromCharCode(c))}`);
+        }
+    }
+    if (tokens.length === 0) throw new SemanticsError('requirement_expression: empty expression');
+    return tokens;
+}
+
+type ReqNode = { ident: string } | { op: 'AND' | 'OR'; left: ReqNode; right: ReqNode };
+
+function requirementOperator(tok: string): 'AND' | 'OR' | null {
+    if (tok === 'AND' || tok === '&&') return 'AND';
+    if (tok === 'OR' || tok === '||') return 'OR';
+    return null;
+}
+
+// Go `requirementParser` — a bounded, left-to-right parser (AEC §8).
+class RequirementParser {
+    pos = 0;
+    nodes = 0;
+    readonly tokens: string[];
+
+    constructor(tokens: string[]) {
+        this.tokens = tokens;
+    }
+
+    parseExpr(depth: number): ReqNode {
+        if (depth > MAX_REQUIREMENT_DEPTH) {
+            throw new SemanticsError(`requirement_shape: nesting deeper than ${MAX_REQUIREMENT_DEPTH}`);
+        }
+        let left = this.parseTerm(depth);
+        while (this.pos < this.tokens.length) {
+            const op = requirementOperator(this.tokens[this.pos]);
+            if (op === null) break;
+            this.pos++;
+            const right = this.parseTerm(depth);
+            this.nodes++;
+            if (this.nodes > MAX_REQUIREMENT_NODES) {
+                throw new SemanticsError(`requirement_shape: more than ${MAX_REQUIREMENT_NODES} terms`);
+            }
+            left = { op, left, right };
+        }
+        return left;
+    }
+
+    parseTerm(depth: number): ReqNode {
+        if (this.pos >= this.tokens.length) {
+            throw new SemanticsError('requirement_expression: unexpected end of expression');
+        }
+        const tok = this.tokens[this.pos];
+        if (tok === '(') {
+            this.pos++;
+            const inner = this.parseExpr(depth + 1);
+            if (this.pos >= this.tokens.length || this.tokens[this.pos] !== ')') {
+                throw new SemanticsError('requirement_expression: missing )');
+            }
+            this.pos++;
+            return inner;
+        }
+        if (tok === ')' || requirementOperator(tok) !== null) {
+            throw new SemanticsError(`requirement_expression: expected a term, got ${JSON.stringify(tok)}`);
+        }
+        this.pos++;
+        return { ident: tok };
+    }
+}
+
+// Go `parseRequirementExpression(in) (*requirementExpr, error)`.
+function parseRequirementExpression(src: string): ReqNode {
+    if (!src.trim()) throw new SemanticsError('requirement_expression: empty expression');
+    const parser = new RequirementParser(tokenizeRequirement(src));
+    const expr = parser.parseExpr(0);
+    if (parser.pos !== parser.tokens.length) {
+        throw new SemanticsError(`requirement_expression: unexpected ${JSON.stringify(parser.tokens[parser.pos])}`);
+    }
+    return expr;
+}
+
+// Go `(requirementExpr) eval(present)` — left-to-right, equal binding.
+function exprEval(node: ReqNode, present: (role: string) => boolean): boolean {
+    if ('ident' in node) return present(node.ident);
+    if (node.op === 'AND') return exprEval(node.left, present) && exprEval(node.right, present);
+    return exprEval(node.left, present) || exprEval(node.right, present);
+}
+
+function exprRoles(node: ReqNode, acc: Set<string>): void {
+    if ('ident' in node) { acc.add(node.ident); return; }
+    exprRoles(node.left, acc);
+    exprRoles(node.right, acc);
+}
+
+// Go `(Requirement) Validate() error` — the version, the identifiers, every
+// constraint's value grammar, and that the expression parses within the bounded
+// grammar.
+export function validateRequirement(req: Requirement): void {
+    if (req['@version'] !== REQUIREMENT_VERSION) {
+        throw new SemanticsError(`requirement_version: ${JSON.stringify(req['@version'])}`);
+    }
+    if (!req.requirement_id) throw new SemanticsError('requirement_shape: requirement_id required');
+    const expression = req.expression ?? '';
+    if (Buffer.byteLength(expression, 'utf8') > MAX_REQUIREMENT_EXPRESSION_BYTES) {
+        throw new SemanticsError(`requirement_shape: expression longer than ${MAX_REQUIREMENT_EXPRESSION_BYTES} bytes`);
+    }
+    parseRequirementExpression(expression);
+    const seen = new Set<string>();
+    for (const c of req.constraints ?? []) {
+        if (!c.role) throw new SemanticsError('requirement_shape: constraint without a role');
+        validateEvidenceConstraint(c.constraint ?? '');
+        const key = `${c.role}\x00${c.constraint}`;
+        if (seen.has(key)) {
+            throw new SemanticsError(`requirement_shape: duplicate constraint for role ${JSON.stringify(c.role)}`);
+        }
+        seen.add(key);
+    }
+}
+
+// Go `(Requirement) Digest() (Digest, error)` — the requirement profile digest:
+// the JCS digest of the complete object.
+export function requirementDigest(req: Requirement): Digest {
+    validateRequirement(req);
+    return digestOf(req);
+}
+
+// Go `(Requirement) Roles() ([]string, error)` — the sorted distinct role
+// identifiers the expression names.
+export function requirementRoles(req: Requirement): string[] {
+    const expr = parseRequirementExpression(req.expression ?? '');
+    const acc = new Set<string>();
+    exprRoles(expr, acc);
+    return [...acc].sort();
+}
+
+// Go `ParseRequirement(raw []byte) (Requirement, error)`.
+//
+// Decodes a requirement as a closed object: a member this revision does not
+// define is an error, never silently dropped.
+export function parseRequirement(raw: unknown): Requirement {
+    let obj: unknown;
+    if (typeof raw === 'string' || raw instanceof Uint8Array) {
+        const text = typeof raw === 'string' ? raw : Buffer.from(raw).toString('utf8');
+        obj = JSON.parse(text);
+    } else {
+        obj = raw;
+    }
+    if (!isPlainObject(obj)) throw new SemanticsError('requirement_shape: not an object');
+    const unknown = Object.keys(obj).filter((k) => !REQUIREMENT_KNOWN_MEMBERS.has(k));
+    if (unknown.length > 0) {
+        // Go's decoder reports the first unknown member it reaches, spelled the
+        // way encoding/json spells it: `json: unknown field "extra"`.
+        throw new SemanticsError(`requirement_shape: json: unknown field ${JSON.stringify([...unknown].sort()[0])}`);
+    }
+    validateRequirement(obj as unknown as Requirement);
+    return obj as unknown as Requirement;
+}
+
+// Go `EvaluateRequirement(req, facts, ctx) (RequirementResult, error)`.
+//
+// Decides whether the presented facts fill the relying party's bar.  The
+// requirement must come from relying-party configuration: this function takes
+// it as an argument and never reads it from the evidence.
+//
+// Precedence is violated > unknown > satisfied, so no failure degrades toward
+// admission.
+export function evaluateRequirement(
+    req: Requirement, facts: EvidenceFact[], ctx: GoEvidenceContext = {},
+): RequirementResult {
+    validateRequirement(req);
+    const out: RequirementResult = {
+        requirement_id: req.requirement_id,
+        digest: requirementDigest(req),
+        verdict: EVIDENCE_SATISFIED,
+        expression: true,
+    };
+
+    const expr = parseRequirementExpression(req.expression ?? '');
+    const present = (role: string): boolean =>
+        evidenceFactsOfRole(facts, role).some((f) => f.verified === true);
+
+    out.expression = exprEval(expr, present);
+    if (!out.expression) {
+        out.missing_roles = requirementRoles(req).filter((r) => !present(r));
+    }
+
+    let unknown = false;
+    let violated = false;
+    const evaluations: EvidenceEvaluation[] = [];
+    for (const c of req.constraints ?? []) {
+        const evaluation = evaluateEvidenceConstraint(
+            c.constraint, evidenceFactsOfRole(facts, c.role), ctx);
+        evaluations.push(evaluation);
+        if (evaluation.verdict === EVIDENCE_VIOLATED) violated = true;
+        else if (evaluation.verdict === EVIDENCE_UNKNOWN) unknown = true;
+    }
+    if (evaluations.length > 0) out.constraints = evaluations;
+
+    if (violated || !out.expression) out.verdict = EVIDENCE_VIOLATED;
+    else if (unknown) out.verdict = EVIDENCE_UNKNOWN;
+    else out.verdict = EVIDENCE_SATISFIED;
+    return out;
+}
+
+// Go `(RequirementResult) Satisfied() bool` — only an explicit satisfied
+// verdict counts, so "unknown" can never be read as "yes".
+export function requirementSatisfied(result: RequirementResult): boolean {
+    return result.verdict === EVIDENCE_SATISFIED;
+}
+
+// Go `(RequirementResult) Satisfaction() Satisfaction` — §10's binary report
+// form.
+export function requirementSatisfaction(result: RequirementResult): { verdict: string; reason?: string } {
+    if (result.verdict === EVIDENCE_SATISFIED) return { verdict: SATISFACTION_SATISFIED };
+    if (!result.expression) {
+        return { verdict: SATISFACTION_UNSATISFIED, reason: SATISFACTION_REASON_EXPRESSION_FALSE };
+    }
+    for (const c of result.constraints ?? []) {
+        if (c.verdict === EVIDENCE_VIOLATED || c.verdict === EVIDENCE_UNKNOWN) {
+            return { verdict: SATISFACTION_UNSATISFIED, reason: c.reason ?? '' };
+        }
+    }
+    return { verdict: SATISFACTION_UNSATISFIED, reason: SATISFACTION_REASON_UNSATISFIED };
+}
+
+
+// --- register/semantics/challenge.go -----------------------------------------
+
+export const CHALLENGE_VERSION = 'CLC-CHALLENGE-v1';
+
+export const MIN_CHALLENGE_NONCE_BYTES = 8;
+export const MAX_CHALLENGE_NONCE_BYTES = 128;
+export const MAX_CHALLENGE_JITTER_SEC = 300;
+
+export interface ChallengeRetryTiming {
+    not_before: string;
+    jitter_sec: number;
+}
+
+export interface ChallengeRequired {
+    id: string;
+    constraint?: string;
+    reason: string;
+}
+
+export interface Challenge {
+    '@version': string;
+    challenge_id: string;
+    nonce: string;
+    audience?: string;
+    action_digest?: Digest;
+    requirement_id?: string;
+    requirement_digest?: Digest;
+    required: ChallengeRequired[];
+    obtain_hints?: string[];
+    retry_timing?: ChallengeRetryTiming;
+    expires_at: string;
+}
+
+export interface ChallengeParams {
+    id?: string;
+    nonce?: string;
+    audience?: string;
+    action_digest?: Digest;
+    requirementId?: string;
+    obtain_hints?: string[];
+    retry_timing?: ChallengeRetryTiming;
+    now: string;
+    ttl_sec?: number;
+}
+
+function requireUTC(s: unknown, what: string): Date {
+    const str = typeof s === 'string' ? s : null;
+    if (what === 'expires_at') {
+        if (!str || str === '') throw new SemanticsError('challenge_shape: expires_at required');
+    }
+    const t = parseRFC3339(str);
+    if (t === null) {
+        throw new SemanticsError(`challenge_shape: ${what} must be a UTC instant`);
+    }
+    if (typeof str === 'string' && !isUTCInstantString(str)) {
+        if (what === 'expires_at') {
+            throw new SemanticsError('challenge_shape: expires_at must be UTC');
+        }
+        throw new SemanticsError(`challenge_shape: ${what} must be a UTC instant`);
+    }
+    return t;
+}
+
+function isoUTC(t: Date): string {
+    return new Date(t.getTime()).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+// Go `(Challenge) Authorizes() bool` — always false; the method exists so that
+// call sites cannot read a challenge as a verdict by accident.
+export function challengeAuthorizes(_c: Challenge): boolean {
+    return false;
+}
+
+// Go `(Challenge) Validate() error` — shape and bindings.
+export function validateChallenge(c: Challenge): void {
+    if (c['@version'] !== CHALLENGE_VERSION) {
+        throw new SemanticsError(`challenge_shape: version ${JSON.stringify(c['@version'])}`);
+    }
+    if (!c.challenge_id) throw new SemanticsError('challenge_shape: challenge_id required');
+    const n = Buffer.byteLength(c.nonce ?? '', 'utf8');
+    if (n < MIN_CHALLENGE_NONCE_BYTES || n > MAX_CHALLENGE_NONCE_BYTES) {
+        throw new SemanticsError(`challenge_shape: nonce must be ${MIN_CHALLENGE_NONCE_BYTES}..${MAX_CHALLENGE_NONCE_BYTES} bytes`);
+    }
+    if (!digestUsable(c.action_digest)) throw new SemanticsError('challenge_shape: action_digest required');
+    if (c.requirement_digest !== undefined && !digestUsable(c.requirement_digest)) {
+        throw new SemanticsError('challenge_shape: unusable requirement_digest');
+    }
+    if (!c.required || c.required.length === 0) throw new SemanticsError('challenge_shape: nothing required');
+    for (const item of c.required) {
+        if (!item.id) throw new SemanticsError('challenge_shape: required item without an id');
+    }
+    const expires = requireUTC(c.expires_at, 'expires_at');
+    if (c.retry_timing) {
+        const notBefore = requireUTC(c.retry_timing.not_before, 'retry_timing.not_before');
+        const jitter = c.retry_timing.jitter_sec;
+        if (jitter < 0 || jitter > MAX_CHALLENGE_JITTER_SEC) {
+            throw new SemanticsError('challenge_shape: jitter_sec out of range');
+        }
+        if (notBefore > expires) {
+            throw new SemanticsError('challenge_shape: retry_timing.not_before is after expiry');
+        }
+    }
+}
+
+// Go `(Challenge) Usable(now time.Time) error` — an expired challenge is dead:
+// retrying against it is the load amplification the specification warns about.
+export function challengeUsable(c: Challenge, now: string): void {
+    validateChallenge(c);
+    const when = requireUTC(now, 'now');
+    const expires = requireUTC(c.expires_at, 'expires_at');
+    if (!(when < expires)) {
+        throw new SemanticsError(`challenge_expired: expired at ${c.expires_at}`);
+    }
+    if (c.retry_timing && when < requireUTC(c.retry_timing.not_before, 'retry_timing.not_before')) {
+        throw new SemanticsError(`challenge_retry_not_before: opens at ${c.retry_timing.not_before}`);
+    }
+}
+
+// Go `(Challenge) Digest() (Digest, error)` — binds the challenge so a caller
+// can identify exactly which challenge it answered.
+export function challengeDigest(c: Challenge): Digest {
+    validateChallenge(c);
+    return digestOf(c);
+}
+
+function sortedChallengeItems(items: ChallengeRequired[]): ChallengeRequired[] {
+    return [...items].sort((a, b) => {
+        const ka = `${a.id}\x00${a.constraint ?? ''}\x00${a.reason}`;
+        const kb = `${b.id}\x00${b.constraint ?? ''}\x00${b.reason}`;
+        return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
+}
+
+function buildChallenge(versionItems: ChallengeRequired[], params: ChallengeParams): Challenge {
+    const ttl = (params.ttl_sec ?? (params as any).ttlSec ?? 0);
+    const c: Challenge = {
+        '@version': CHALLENGE_VERSION,
+        challenge_id: params.id ?? '',
+        nonce: params.nonce ?? '',
+        required: sortedChallengeItems(versionItems),
+        expires_at: isoUTC(new Date(requireUTC(params.now, 'now').getTime() + ttl * 1000)),
+    };
+    if (params.audience) c.audience = params.audience;
+    if ((params as any).action_digest !== undefined) c.action_digest = (params as any).action_digest; else if ((params as any).actionDigest !== undefined) c.action_digest = (params as any).actionDigest;
+    if ((params as any).obtain_hints !== undefined) c.obtain_hints = (params as any).obtain_hints; else if ((params as any).obtainHints !== undefined) c.obtain_hints = (params as any).obtainHints;
+    if ((params as any).retry_timing !== undefined) c.retry_timing = (params as any).retry_timing; else if ((params as any).retryTiming !== undefined) c.retry_timing = (params as any).retryTiming;
+    validateChallenge(c);
+    return c;
+}
+
+// Go `BuildChallengeFromRequirement(req, result, params) (Challenge, error)`.
+//
+// A satisfied result needs no challenge, and a hard denial with nothing missing
+// is reported as such rather than dressed up as a retryable request.
+export function buildChallengeFromRequirement(
+    req: Requirement, result: RequirementResult, params: ChallengeParams,
+): Challenge {
+    validateRequirement(req);
+    if (result.verdict === EVIDENCE_SATISFIED) {
+        throw new SemanticsError(`challenge_not_outstanding: requirement ${req.requirement_id} is satisfied`);
+    }
+
+    const required: ChallengeRequired[] = [];
+    for (const role of result.missing_roles ?? []) {
+        required.push({ id: role, reason: 'role_unfilled' });
+    }
+    for (const evaluation of result.constraints ?? []) {
+        if (evaluation.verdict === EVIDENCE_SATISFIED) continue;
+        required.push({
+            id: evaluation.constraint,
+            constraint: evaluation.constraint,
+            reason: evaluation.reason ?? '',
+        });
+    }
+    if (required.length === 0) {
+        throw new SemanticsError(
+            `challenge_not_outstanding: requirement ${req.requirement_id} reported no outstanding item`);
+    }
+
+    const c = buildChallenge(required, params);
+    c.requirement_id = req.requirement_id;
+    c.requirement_digest = requirementDigest(req);
+    validateChallenge(c);
+    return c;
+}
+
+// Go `BuildChallengeFromDecision(d, params) (Challenge, error)` — for an
+// authorization decision carrying §8.4 residual obligations.
+export function buildChallengeFromDecision(d: Decision, params: ChallengeParams): Challenge {
+    checkDecisionShape(d);
+    if (d.verdict !== VERDICT_ALLOW_UNRESOLVED) {
+        throw new SemanticsError(
+            `challenge_not_outstanding: verdict ${d.verdict} carries no residual obligation`);
+    }
+    const items: ChallengeRequired[] = obligations(d).map((o) => ({
+        id: constraintIdentity(o),
+        constraint: o,
+        reason: 'obligation_undischarged',
+    }));
+    return buildChallenge(items, params);
+}
+
+
+// --- register/semantics/envelope.go ------------------------------------------
+
+export const PAYLOAD_TYPE_IN_TOTO = 'application/vnd.in-toto+json';
+export const STATEMENT_TYPE_IN_TOTO = 'https://in-toto.io/Statement/v1';
+export const PREDICATE_TYPE_CLC_DECISION = 'https://varwof.com/clc/v1/decision-record';
+
+// subjectNameAction / subjectNameInputs — the two subject entries the profile
+// pins, so an envelope whose statement does not carry the decision's own
+// action/input digests is re-targetable and is refused.
+export const SUBJECT_NAME_ACTION = 'action';
+export const SUBJECT_NAME_INPUTS = 'clc-inputs';
+
+const IN_TOTO_ALGS: Record<string, string> = {
+    [DIGEST_ALG_SHA256]: 'sha256',
+    'sha-384': 'sha384',
+    'sha-512': 'sha512',
+};
+
+export interface InTotoStatement {
+    _type: string;
+    subject: Array<{ name: string; digest: Record<string, string> }>;
+    predicateType: string;
+    predicate: DecisionRecord;
+}
+
+// `payload` and `sig` hold the *decoded* text of Go's in-memory `[]byte`, not
+// the bytes encoding/json would put on the wire.  Go writes them as base64;
+// these ports write the same bytes as inline JSON strings, so a port-produced
+// envelope is not byte-identical to a Go-produced one.  The signature is over
+// PAE(payloadType, payload) — the raw bytes — which is identical either way,
+// so verification is unaffected.
+export interface EnvelopeSignatureEntry {
+    keyid?: string;
+    sig: string;
+}
+
+export interface Envelope {
+    payload: string;
+    payloadType: string;
+    signatures: EnvelopeSignatureEntry[];
+}
+
+// Go `PAE(payloadType, payload) []byte` — the DSSE v1 pre-authentication
+// encoding:
+//
+//     PAE(type, body) = "DSSEv1" SP LEN(type) SP type SP LEN(body) SP body
+//
+// DSSE signs these bytes, not the payload alone, so a payload cannot be
+// reinterpreted under a different type.
+export function pae(payloadType: string, payload: string | Uint8Array): Buffer {
+    const body = typeof payload === 'string' ? Buffer.from(payload, 'utf8') : Buffer.from(payload);
+    const type = Buffer.from(payloadType, 'utf8');
+    const out: Buffer[] = [Buffer.from('DSSEv1', 'ascii')];
+    for (const part of [type, body]) {
+        out.push(Buffer.from(' ', 'ascii'), Buffer.from(String(part.length), 'ascii'), Buffer.from(' ', 'ascii'), part);
+    }
+    return Buffer.concat(out);
+}
+
+// Go `NewStatement(rec) (Statement, error)` — the in-toto statement for a
+// decision record.  The subjects are the action and the decision's own input
+// digest, so both are covered by any signature over the statement.
+export function newStatement(rec: DecisionRecord): InTotoStatement {
+    const operations = rec.inputs?.operations ?? [];
+    if (operations.length !== 1) {
+        throw new SemanticsError(`envelope_shape: ${operations.length} operations`);
+    }
+    if (!rec.input_digest?.alg || !rec.input_digest?.value) {
+        throw new SemanticsError('envelope_shape: record carries no input digest');
+    }
+    const alg = IN_TOTO_ALGS[rec.input_digest.alg];
+    if (alg === undefined) {
+        throw new SemanticsError(`envelope_shape: unsupported digest algorithm ${JSON.stringify(rec.input_digest.alg)}`);
+    }
+    const actionBytes = Buffer.from(canonicalJSON(operations), 'utf8');
+    const actionDigest = createHash('sha256').update(actionBytes).digest('hex');
+    return {
+        _type: STATEMENT_TYPE_IN_TOTO,
+        subject: [
+            { name: SUBJECT_NAME_ACTION, digest: { [alg]: actionDigest } },
+            { name: SUBJECT_NAME_INPUTS,
+              digest: { [alg]: Buffer.from(rec.input_digest.value, 'base64').toString('hex') } },
+        ],
+        predicateType: PREDICATE_TYPE_CLC_DECISION,
+        predicate: rec,
+    };
+}
+
+// Go `NewEnvelope(rec) (Envelope, error)` — wraps a decision record in an
+// unsigned DSSE envelope.
+export function newEnvelope(rec: DecisionRecord): Envelope {
+    const st = newStatement(rec);
+    return { payload: canonicalJSON(st), payloadType: PAYLOAD_TYPE_IN_TOTO, signatures: [] };
+}
+
+// Go `(Envelope) Statement() (Statement, error)`.
+export function envelopeStatement(e: Envelope): InTotoStatement {
+    if (e.payloadType !== PAYLOAD_TYPE_IN_TOTO) {
+        throw new SemanticsError(`envelope_payload_type: ${JSON.stringify(e.payloadType)}`);
+    }
+    if (!e.payload) throw new SemanticsError('envelope_shape: empty payload');
+    try {
+        return JSON.parse(e.payload) as InTotoStatement;
+    } catch (exc) {
+        throw new SemanticsError(`envelope_shape: ${exc instanceof Error ? exc.message : exc}`);
+    }
+}
+
+// Go `(Envelope) DecisionRecord() (DecisionRecord, error)` — the record carried
+// as the predicate.
+export function envelopeDecisionRecord(e: Envelope): DecisionRecord {
+    return envelopeStatement(e).predicate;
+}
+
+// Go `(Envelope) Sign(keyID, sign) error` — appends a signature over
+// PAE(payloadType, payload).  The signing primitive is supplied by the caller:
+// DSSE deliberately leaves the signature format to the out-of-band agreement.
+export function envelopeSign(
+    e: Envelope, keyId: string, sign?: (paeBytes: Buffer) => string,
+): void {
+    if (!sign) throw new SemanticsError('envelope_shape: nil signer');
+    const sig = sign(pae(e.payloadType, e.payload));
+    e.signatures.push({ keyid: keyId, sig });
+}
+
+function matchSubject(got: InTotoStatement['subject'], want: InTotoStatement['subject'][number]): void {
+    for (const s of got) {
+        if (s.name !== want.name) continue;
+        for (const [alg, value] of Object.entries(want.digest ?? {})) {
+            if ((s.digest ?? {})[alg] !== value) {
+                throw new SemanticsError(`envelope_subject_mismatch: subject ${JSON.stringify(want.name)} digest mismatch`);
+            }
+            return;
+        }
+    }
+    throw new SemanticsError(`envelope_subject_mismatch: subject ${JSON.stringify(want.name)} missing`);
+}
+
+// Go `(Envelope) Check() error` — internal consistency without any signature:
+// payload type, statement shape, subject binding to the decision, and the
+// record's own digest/recomputation.
+export function envelopeCheck(e: Envelope): void {
+    const st = envelopeStatement(e);
+    if (st._type !== STATEMENT_TYPE_IN_TOTO) {
+        throw new SemanticsError(`envelope_shape: statement type ${JSON.stringify(st._type)}`);
+    }
+    if (st.predicateType !== PREDICATE_TYPE_CLC_DECISION) {
+        throw new SemanticsError(`envelope_shape: predicate type ${JSON.stringify(st.predicateType)}`);
+    }
+    recordVerify(st.predicate);
+    const want = newStatement(st.predicate);
+    for (const w of want.subject) matchSubject(st.subject ?? [], w);
+}
+
+// Go `(Envelope) VerifyRecord(verify) error` — checks the envelope and then
+// requires at least one signature to verify.  `verify` is the caller's
+// signature primitive; it receives the KEYID hint (which MUST NOT be trusted on
+// its own) and the PAE bytes.
+export function envelopeVerifyRecord(
+    e: Envelope,
+    verify?: (keyId: string | undefined, paeBytes: Buffer, sig: string) => void,
+): void {
+    envelopeCheck(e);
+    const signatures = e.signatures ?? [];
+    if (signatures.length === 0) throw new SemanticsError('envelope_signature: no signatures');
+    if (!verify) throw new SemanticsError('envelope_signature: nil verifier');
+    const paeBytes = pae(e.payloadType, e.payload);
+    let firstError: Error | null = null;
+    for (const sig of signatures) {
+        if (!sig.sig) {
+            if (firstError === null) firstError = new SemanticsError('envelope_signature: empty signature');
+            continue;
+        }
+        try {
+            verify(sig.keyid, paeBytes, sig.sig);
+            return;
+        } catch (exc) {
+            // Any verifier failure is a refusal.
+            if (firstError === null) {
+                firstError = new SemanticsError(`envelope_signature: ${exc instanceof Error ? exc.message : exc}`);
+            }
+        }
+    }
+    if (firstError !== null) throw firstError;
+}
+
+
+// --- register/semantics/match.go ---------------------------------------------
+
+export const SUITE_JCS_SHA256 = 'jcs-sha256';
+export const ACTION_ID_PREFIX = 'clc-action:1';
+
+export const MATCH_EXACT = 'MATCH';
+export const MATCH_NOT_EQUIVALENT = 'NOT_EQUIVALENT';
+export const MATCH_INDETERMINATE = 'INDETERMINATE';
+
+export type MatchVerdict = typeof MATCH_EXACT | typeof MATCH_NOT_EQUIVALENT | typeof MATCH_INDETERMINATE;
+
+const SHA256_SIZE = 32;
+
+export interface ActionTypeDefinition {
+    type: string;
+    material_fields: string[];
+}
+
+export interface ActionId {
+    type: string;
+    suite: string;
+    digest: Digest;
+}
+
+export interface ActionMappingProfile {
+    id: string;
+    digest?: Digest;
+}
+
+// Go `ActionTypeDefinition` — the declared material field set of one action
+// type.  Required and optional-but-included fields are both listed here.
+export function actionTypeDefinition(type: string, materialFields: string[]): ActionTypeDefinition {
+    return { type, material_fields: [...materialFields] };
+}
+
+// Go `(ActionTypeDefinition) Validate() error`.
+export function validateActionTypeDefinition(d: ActionTypeDefinition): void {
+    if (!d.type) throw new SemanticsError('action_shape: action type required');
+    const fields = d.material_fields ?? [];
+    if (fields.length === 0) {
+        throw new SemanticsError(`action_shape: action type ${d.type} declares no material fields`);
+    }
+    const seen = new Set<string>();
+    for (const f of fields) {
+        if (!f) throw new SemanticsError('action_shape: empty material field name');
+        if (seen.has(f)) throw new SemanticsError(`action_shape: duplicate material field ${JSON.stringify(f)}`);
+        seen.add(f);
+    }
+}
+
+// Go `ActionId` — a typed, suite-tagged content identity for the material
+// content of one action.
+export function actionId(type: string, suite: string, digestValue: Digest): ActionId {
+    return { type, suite, digest: digestValue };
+}
+
+function suiteValid(suite: string): boolean {
+    return suite === SUITE_JCS_SHA256;
+}
+
+function digestAlgOf(suite: string): string {
+    return suite === SUITE_JCS_SHA256 ? DIGEST_ALG_SHA256 : '';
+}
+
+// Go's `base64.RawURLEncoding.DecodeString`: alphabet only, no padding
+// character, and a length that could not be produced by encoding bytes.
+// Node's `Buffer.from(..., 'base64')` is permissive and returns an empty
+// buffer instead of failing, so `!!` must be refused up front.
+const B64URL_RE = /^[A-Za-z0-9_-]*$/;
+
+function b64urlStrict(s: string): boolean {
+    return B64URL_RE.test(s) && s.length % 4 !== 1;
+}
+
+function b64urlPad(s: string): string {
+    return s + '='.repeat((4 - (s.length % 4)) % 4);
+}
+
+// Go `(ActionId) Validate() error` — the identifier's own shape.
+export function validateActionId(a: ActionId): void {
+    if (!a.type) throw new SemanticsError('action_shape: action type required');
+    if (!suiteValid(a.suite)) throw new SemanticsError(`action_suite: ${JSON.stringify(a.suite)}`);
+    const d = a.digest;
+    if (!d?.alg || !d?.value) throw new SemanticsError('action_shape: action digest required');
+    // The digest length is suite-pinned: for jcs-sha256 the value must be
+    // exactly 32 bytes.
+    const raw = Buffer.from(b64urlPad(d.value), 'base64');
+    if (a.suite === SUITE_JCS_SHA256 && raw.length !== SHA256_SIZE) {
+        throw new SemanticsError(`action_shape: ${a.suite} digest must be ${SHA256_SIZE} bytes, got ${raw.length}`);
+    }
+}
+
+// Go `(ActionId) String() string` — clc-action:1:<type>:<suite>:<digest-b64url>.
+export function actionIdString(a: ActionId): string {
+    return `${ACTION_ID_PREFIX}:${a.type}:${a.suite}:${a.digest?.value ?? ''}`;
+}
+
+// Go `ParseActionId(s) (ActionId, error)` — parses the string form.
+export function parseActionId(s: string): ActionId {
+    const parts = s.split(':');
+    if (parts.length !== 5 || parts[0] !== 'clc-action' || parts[1] !== '1') {
+        throw new SemanticsError(`action_shape: ${JSON.stringify(s)}`);
+    }
+    if (!b64urlStrict(parts[4])) {
+        throw new SemanticsError(`action_shape: digest is not base64url: ${JSON.stringify(s)}`);
+    }
+    const raw: Buffer = Buffer.from(b64urlPad(parts[4]), 'base64');
+    const ident = actionId(parts[2], parts[3], { alg: digestAlgOf(parts[3]), value: parts[4] });
+    validateActionId(ident);
+    if (Buffer.compare(Buffer.from(b64urlPad(ident.digest.value), 'base64'), raw) !== 0) {
+        throw new SemanticsError(`action_shape: digest is not base64url: ${JSON.stringify(s)}`);
+    }
+    return ident;
+}
+
+// Go `MaterialProjection(def, action) (map[string]any, error)` — the map
+// ComputeActionID hashes, so a caller can disclose exactly what entered the
+// identity.
+export function materialProjection(
+    d: ActionTypeDefinition, action: Record<string, unknown>,
+): Record<string, unknown> {
+    validateActionTypeDefinition(d);
+    const out: Record<string, unknown> = {};
+    for (const field of d.material_fields) {
+        if (!(field in action)) {
+            throw new SemanticsError(`action_not_matchable: material field ${JSON.stringify(field)} absent for ${d.type}`);
+        }
+        out[field] = action[field];
+    }
+    return out;
+}
+
+
+// Go `MaterialFieldDigest(def, action) ([]string, error)` — the per-field
+// digests of the material projection in a deterministic order.
+export function materialFieldDigest(
+    d: ActionTypeDefinition, action: Record<string, unknown>,
+): string[] {
+    const projection = materialProjection(d, action);
+    return Object.keys(projection).sort().map((field) =>
+        `${field}:${createHash('sha256').update(Buffer.from(canonicalJSON(projection[field]), 'utf8')).digest('hex')}`);
+}
+
+// Go `Match(observed, evidence) MatchVerdict` — compares a natively verified
+// evidence identity with the executor's observed identity.  It never guesses:
+// anything it cannot decide is INDETERMINATE.
+export function match(observed: ActionId, evidence: ActionId): MatchVerdict {
+    try {
+        validateActionId(observed);
+        validateActionId(evidence);
+    } catch {
+        return MATCH_INDETERMINATE;
+    }
+    if (observed.type !== evidence.type || observed.suite !== evidence.suite) {
+        // Cross-type or cross-suite comparison is a mapping problem, not an
+        // inequality.
+        return MATCH_INDETERMINATE;
+    }
+    return digestEqual(observed.digest, evidence.digest) ? MATCH_EXACT : MATCH_NOT_EQUIVALENT;
+}
+
+// Go `ActionMappingProfile` — names a projection by its content hash and is
+// pinned by the relying party.
+export function actionMappingProfile(id: string, digestValue?: Digest): ActionMappingProfile {
+    const p: ActionMappingProfile = { id };
+    if (digestValue !== undefined) p.digest = digestValue;
+    return p;
+}
+
+// Go `(ActionMappingProfile) Pinned() bool` — a profile without a usable digest
+// cannot be pinned, and an unpinned profile establishes nothing.
+export function mappingProfilePinned(profile?: ActionMappingProfile | null): boolean {
+    if (!profile) return false;
+    return !!profile.id && digestUsable(profile.digest);
+}
+
+// Go `MapAndMatch(profile, projector, evidence, expected) MatchVerdict`.
+//
+// Every failure mode — unpinned profile, projector error, or a projection that
+// changes material content — is INDETERMINATE, never MATCH.
+export function mapAndMatch(
+    profile: ActionMappingProfile | null | undefined,
+    projector: ((p: ActionMappingProfile, ev: ActionId) => ActionId) | null | undefined,
+    evidence: ActionId,
+    expected: ActionId,
+): MatchVerdict {
+    if (!profile || !mappingProfilePinned(profile) || !projector) return MATCH_INDETERMINATE;
+    let projected: ActionId;
+    try {
+        projected = projector(profile, evidence);
+    } catch {
+        return MATCH_INDETERMINATE;
+    }
+    if (!projected || projected.type !== expected.type || projected.suite !== expected.suite) {
+        return MATCH_INDETERMINATE;
+    }
+    return match(expected, projected);
 }

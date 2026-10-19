@@ -10,6 +10,50 @@ on:
   pull_request:
 
 jobs:
+  parity:
+    runs-on: ubuntu-latest
+    env:
+      CLC_CAPABILITY_DIR: ../capability
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch CLC capability corpus
+        run: git clone --depth 1 https://github.com/varwof/capability.git ../capability
+
+      - name: Fetch Go reference implementation
+        run: git clone --depth 1 https://github.com/varwof/register.git ../register
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ../register/go.mod
+          cache: false
+
+      - name: Install TypeScript dev dependencies
+        run: npm ci --prefix ts
+
+      - name: Emit Python canonical outputs
+        run: python3 extension-parity-run.py > /tmp/clc-parity-python.json
+
+      - name: Emit TypeScript canonical outputs
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/extension-parity-run.ts > /tmp/clc-parity-typescript.json
+
+      - name: Emit Go canonical outputs
+        run: go -C ../register run ./cmd/extension-parity-run > /tmp/clc-parity-go.json
+
+      - name: Compare Python and TypeScript canonical outputs
+        run: diff -u /tmp/clc-parity-python.json /tmp/clc-parity-typescript.json
+
+      - name: Compare Python and Go canonical outputs
+        run: diff -u /tmp/clc-parity-python.json /tmp/clc-parity-go.json
+
   vectors:
     runs-on: ubuntu-latest
     steps:
@@ -23,7 +67,10 @@ jobs:
         run: git clone --depth 1 https://github.com/varwof/capability.git ../capability
 
       - name: Syntax check
-        run: python3 -m py_compile clc_semantics.py vectors-run.py contains-vectors-run.py contain-property-run.py param-bounds-vectors-run.py param-bounds-meet-vectors-run.py param-bounds-meet-property-run.py resolve-vectors-run.py constraint-union-vectors-run.py authorize-chain-vectors-run.py evidence_semantics.py scheme_decl.py ocmp.py symmetry-vectors-run.py quantity-vectors-run.py scheme-declaration-vectors-run.py offline-vectors-run.py profile-declarations-run.py
+        run: python3 -m py_compile clc_semantics.py vectors-run.py contains-vectors-run.py contain-property-run.py param-bounds-vectors-run.py param-bounds-meet-vectors-run.py param-bounds-meet-property-run.py resolve-vectors-run.py constraint-union-vectors-run.py authorize-chain-vectors-run.py evidence_semantics.py scheme_decl.py ocmp.py symmetry-vectors-run.py quantity-vectors-run.py scheme-declaration-vectors-run.py offline-vectors-run.py profile-declarations-run.py extended_test.py
+
+      - name: Extended API positive/negative checks (Python)
+        run: python3 extended_test.py
 
       - name: Symmetry corpus (authorization + evidence, Python)
         env:
@@ -110,6 +157,20 @@ jobs:
           CLC_CONSTRAINT_UNION_VECTORS: ../capability/data/_vectors/clc-v1/constraint-union-collation-vectors.json
         run: python3 constraint-union-vectors-run.py
 
+      - name: Python branch coverage (80% minimum)
+        run: |
+          python3 -m venv /tmp/clc-python-coverage-venv
+          /tmp/clc-python-coverage-venv/bin/pip install --quiet coverage
+          COVERAGE=/tmp/clc-python-coverage-venv/bin/coverage bash coverage-run.sh
+
+      - name: Upload Python coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: clc-python-coverage
+          path: |
+            /tmp/clc-python-coverage.json
+            /tmp/clc-python-coverage.xml
+
   ts:
     runs-on: ubuntu-latest
     steps:
@@ -121,6 +182,15 @@ jobs:
 
       - name: Fetch CLC-v1 vectors (capability repo)
         run: git clone --depth 1 https://github.com/varwof/capability.git ../capability
+
+      - name: Install TypeScript dev dependencies
+        run: npm ci --prefix ts
+
+      - name: TypeScript strict typecheck
+        run: npm --prefix ts run typecheck
+
+      - name: Extended API positive/negative checks (TS)
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/extended_test.ts
 
       - name: Symmetry corpus (authorization + evidence, TS)
         env:
@@ -206,3 +276,14 @@ jobs:
         env:
           CLC_CONSTRAINT_UNION_VECTORS: ../capability/data/_vectors/clc-v1/constraint-union-collation-vectors.json
         run: node --disable-warning=ExperimentalWarning --experimental-strip-types ts/constraint-union-vectors-run.ts
+
+      - name: TypeScript coverage gates
+        env:
+          NODE_V8_COVERAGE: /tmp/clc-typescript-v8-coverage
+        run: bash ts/coverage-test.sh
+
+      - name: Upload TypeScript V8 coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: clc-typescript-coverage
+          path: /tmp/clc-typescript-v8-coverage

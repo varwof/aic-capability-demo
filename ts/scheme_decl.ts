@@ -92,35 +92,6 @@ export function load(path: string): Declaration {
   return decl;
 }
 
-function param(decl: Declaration, capability: string, name: string): Param | undefined {
-  return decl.capabilities?.[capability]?.params?.[name];
-}
-
-function quantityNumber(value: unknown, unit: string): [number | null, string] {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return [null, 'invalid_params_binding'];
-  }
-  const v = value as Record<string, unknown>;
-  const val = v.value;
-  if (typeof val !== 'number' || !Number.isFinite(val)) {
-    return [null, 'invalid_params_binding'];
-  }
-  const u = v.unit;
-  if (typeof u !== 'string' || u.length === 0) {
-    return [null, 'invalid_params_binding'];
-  }
-  if (u !== unit) return [null, 'unit_mismatch'];
-  let scale = 0;
-  if ('scale' in v) {
-    const s = v.scale;
-    if (typeof s !== 'number' || !Number.isInteger(s)) {
-      return [null, 'invalid_params_binding'];
-    }
-    scale = s;
-  }
-  return [val * 10 ** -scale, ''];
-}
-
 function domainMap(decl: Declaration, capability: string): DomainMap {
   const params = decl.capabilities?.[capability]?.params ?? {};
   const dm: DomainMap = {};

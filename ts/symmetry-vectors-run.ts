@@ -10,7 +10,7 @@ import * as path from 'node:path';
 import {
   authorizeSet,
   authorizeWithChain,
-  computeActionId,
+  computeActionID,
 } from './clc_semantics.ts';
 import { evaluateConstraint, evaluateRequirement } from './evidence_semantics.ts';
 import type { Grant, Operation } from './clc_semantics.ts';
@@ -37,8 +37,8 @@ function actionMatch(v: SymVector, opParams: Record<string, unknown>): string {
   if (v.observed_type && v.observed_type !== v.type.name) return 'INDETERMINATE';
   if (v.observed_suite && v.observed_suite !== v.suite) return 'INDETERMINATE';
   try {
-    const opId = computeActionId(v.type.name, v.type.material, v.suite, opParams);
-    const obsId = computeActionId(v.type.name, v.type.material, v.suite, v.observed ?? {});
+    const opId = computeActionID(v.type.name, v.type.material, v.suite, opParams);
+    const obsId = computeActionID(v.type.name, v.type.material, v.suite, v.observed ?? {});
     return opId === obsId ? 'MATCH' : 'NOT_EQUIVALENT';
   } catch {
     return 'action_not_matchable';

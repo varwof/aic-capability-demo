@@ -2,10 +2,16 @@
   "name": "aic-capability-demo-clc-ts",
   "private": true,
   "type": "module",
-  "description": "CLC-v1 TypeScript reference implementation + vectors/property runners (Node-only, zero npm deps).",
+  "description": "CLC-v1 TypeScript reference implementation + vectors/property runners (Node runtime with TypeScript as a development dependency).",
   "scripts": {
-    "vectors": "node --disable-warning=ExperimentalWarning --experimental-strip-types ts/vectors-run.ts",
-    "property": "node --disable-warning=ExperimentalWarning --experimental-strip-types ts/property.ts",
-    "test": "node --disable-warning=ExperimentalWarning --experimental-strip-types ts/property.ts && node --disable-warning=ExperimentalWarning --experimental-strip-types ts/vectors-run.ts"
+    "typecheck": "tsc --noEmit",
+    "coverage": "bash coverage-test.sh",
+    "vectors": "node --disable-warning=ExperimentalWarning --experimental-strip-types vectors-run.ts",
+    "property": "node --disable-warning=ExperimentalWarning --experimental-strip-types property.ts",
+    "test": "npm run typecheck && node --disable-warning=ExperimentalWarning --experimental-strip-types extended_test.ts && node --disable-warning=ExperimentalWarning --experimental-strip-types property.ts && node --disable-warning=ExperimentalWarning --experimental-strip-types vectors-run.ts"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.12",
+    "typescript": "5.9.3"
   }
 }

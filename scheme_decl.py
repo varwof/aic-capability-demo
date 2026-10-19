@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from base64 import urlsafe_b64encode
-from typing import Any, Optional
 
 import clc_semantics as clc
 
@@ -67,30 +65,6 @@ def validate(decl: dict) -> None:
         want = _digest(decl)
         if want != decl["digest"]:
             raise DeclarationError("declaration_digest_mismatch", f"want {want}, got {decl['digest']}")
-
-
-def _param(decl: dict, capability: str, name: str) -> Optional[dict]:
-    return decl.get("capabilities", {}).get(capability, {}).get("params", {}).get(name)
-
-
-def _quantity_number(value: Any, unit: str) -> tuple[Optional[float], str]:
-    if not isinstance(value, dict):
-        return None, "invalid_params_binding"
-    val = value.get("value")
-    if isinstance(val, bool) or not isinstance(val, (int, float)):
-        return None, "invalid_params_binding"
-    u = value.get("unit")
-    if not isinstance(u, str) or not u:
-        return None, "invalid_params_binding"
-    if u != unit:
-        return None, "unit_mismatch"
-    scale = 0
-    if "scale" in value:
-        s = value["scale"]
-        if isinstance(s, bool) or not isinstance(s, (int, float)) or s != math.trunc(s):
-            return None, "invalid_params_binding"
-        scale = int(s)
-    return float(val) * (10.0 ** -scale), ""
 
 
 def _domain_map(decl: dict, capability: str) -> dict:

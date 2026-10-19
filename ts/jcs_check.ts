@@ -6,7 +6,7 @@
 //
 // Run: node --experimental-strip-types ts/jcs_check.ts
 import { createHash } from 'node:crypto';
-import { canonicalJSON, computeActionId } from './clc_semantics.ts';
+import { canonicalJSON, computeActionID } from './clc_semantics.ts';
 
 const EXPECT_BYTES = '{"value":"&"}';
 const EXPECT_SHA256 = '9a2fe282f2733070b5a91a182e97d8efdf6e94135e4790a73a380257200a2903';
@@ -26,7 +26,7 @@ const bytesOut = canonicalJSON({ value: '&' });
 check('JCS bytes', bytesOut, EXPECT_BYTES);
 check('sha256', createHash('sha256').update(bytesOut, 'utf8').digest('hex'), EXPECT_SHA256);
 check('b64url', createHash('sha256').update(bytesOut, 'utf8').digest('base64url'), EXPECT_B64URL);
-check('action id', computeActionId('probe.action.1', ['value'], 'jcs-sha256', { value: '&' }), EXPECT_ID);
+check('action id', computeActionID('probe.action.1', ['value'], 'jcs-sha256', { value: '&' }), EXPECT_ID);
 check('utf-16 key order', canonicalJSON({ '\uE000': 'bmp', '\u{1F4A9}': 'astral', a: 'ascii' }), EXPECT_KEY_ORDER);
 
 // Invalid Unicode is refused, not repaired or escaped: a lone surrogate has no

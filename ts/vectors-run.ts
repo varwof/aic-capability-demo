@@ -16,9 +16,10 @@ import {
     intersect,
     revisionCompatible,
     SemanticsError,
-    validateCapabilityId,
+    validateCapabilityID,
     validateRawParams,
 } from './clc_semantics.ts';
+import type { Decision, Grant, Operation } from './clc_semantics.ts';
 
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
@@ -108,7 +109,8 @@ function runVector(v: Vector): Result {
 
     if (v.kind === 'syntax') {
         try {
-            validateCapabilityId((v.request ?? {}).id as string);
+            const id = (v.request ?? {}).id;
+            validateCapabilityID(typeof id === 'string' ? id : undefined);
             r.got = 'valid';
         } catch (e) {
             r.got = 'invalid';
@@ -119,7 +121,10 @@ function runVector(v: Vector): Result {
     }
 
     if (v.kind === 'entail') {
-        const result = entails(v.grant as Grant, v.request as Operation);
+        const result = entails(
+            v.grant as unknown as Grant,
+            v.request as unknown as Operation,
+        );
         r.got = result.entails ? 'allow' : 'deny';
         r.reason = canonicalReason(result.reason ?? '');
         r.pass = r.got === r.expect && r.reason === r.expReason;
@@ -131,8 +136,8 @@ function runVector(v: Vector): Result {
         // (§7 rule 5 -> absent_source), so the grant is only collected when it
         // is actually present.
         const grants: Grant[] = [
-            ...(v.grant == null ? [] : [v.grant as Grant]),
-            ...((v.others ?? []) as Grant[]),
+            ...(v.grant == null ? [] : [v.grant as unknown as Grant]),
+            ...((v.others ?? []) as unknown as Grant[]),
         ];
         let merged: Grant | null = null;
         try {
@@ -142,24 +147,28 @@ function runVector(v: Vector): Result {
             r.got = 'deny';
             r.reason = canonicalReason((e as SemanticsError).message);
         }
-        const note = merged == null ? '' : checkResult(v.expect, merged as Record<string, unknown>);
+        const note = merged == null ? '' : checkResult(
+            v.expect, merged as unknown as Record<string, unknown>);
         r.note = note;
         r.pass = note === '' && r.got === r.expect && r.reason === r.expReason;
         return r;
     }
 
     if (v.kind === 'decide') {
-        let grant = v.grant as Grant | null | undefined;
-        const op = v.request as Operation | null | undefined;
+        let grant = v.grant as unknown as Grant | null | undefined;
+        const op = v.request as unknown as Operation | null | undefined;
 
         let result: Decision;
         // Multi-grant §9.3 aggregation (rev CLC-1.3): grant + others form the
         // authorization grant SET; any-allowing grant authorizes (union), and
         // residual obligations union across covering-and-allowing grants.
         if ((v.multi as boolean) === true) {
-            result = authorizeSet([grant ?? null, ...((v.others ?? []) as Grant[])], op);
+            result = authorizeSet([
+                grant ?? null,
+                ...((v.others ?? []) as unknown as Grant[]),
+            ], op);
         } else {
-            const others = (v.others ?? []) as Grant[];
+            const others = (v.others ?? []) as unknown as Grant[];
             if (others.length > 0) {
                 try {
                     grant = intersect([grant ?? ({ id: '' } as Grant), ...others]);
@@ -196,9 +205,6 @@ function runVector(v: Vector): Result {
 }
 
 // Referenced only for types in the runner above.
-type Grant = import('./clc_semantics.ts').Grant;
-type Operation = import('./clc_semantics.ts').Operation;
-
 function main(): void {
     const envPath = process.env.CLC_VECTORS;
     const here = dirname(fileURLToPath(import.meta.url));

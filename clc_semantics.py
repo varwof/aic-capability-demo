@@ -153,6 +153,66 @@ MAX_PARAMS_SERIALIZED_BYTES = 512
 MAX_PARAMS_NESTING = 32
 
 
+def _q(v: Any) -> str:
+    """Go's `%q` — a double-quoted string literal.  Python's `%r` prints single
+    quotes, so the reference's reason strings would never match byte for byte."""
+    return json.dumps(v, ensure_ascii=False) if isinstance(v, str) else repr(v)
+
+
+def _duration_frac(value: int, base: int, digits: int) -> str:
+    if value == 0:
+        return ""
+    whole, frac = divmod(value, base)
+    if frac == 0:
+        return str(whole)
+    return "%d.%s" % (whole, ("%0*d" % (digits, frac)).rstrip("0"))
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Go's `time.Duration.String()`: the reference prints an age or a bound in
+    unit form (`2m0s`, `1m0s`), never as a raw count of seconds."""
+    ns = int(round(seconds * 1_000_000_000))
+    if ns == 0:
+        return "0s"
+    neg = ns < 0
+    if neg:
+        ns = -ns
+    if ns < 1_000:
+        body = "%dns" % ns
+    elif ns < 1_000_000:
+        body = _duration_frac(ns, 1_000, 3) + "\u00b5s"
+    elif ns < 1_000_000_000:
+        body = _duration_frac(ns, 1_000_000, 6) + "ms"
+    else:
+        secs, nsecs = divmod(ns, 1_000_000_000)
+        frac = _duration_frac(nsecs, 1_000_000_000, 9)
+        if secs < 60:
+            body = "%d%ss" % (secs, frac)
+        elif secs < 3600:
+            body = "%dm%d%ss" % (secs // 60, secs % 60, frac)
+        else:
+            body = "%dh%dm%d%ss" % (secs // 3600, secs % 3600 // 60, secs % 60, frac)
+    return ("-" if neg else "") + body
+
+
+def _go_str_list(values: list) -> str:
+    """Go's `%v` on a []string: `[a b]` — space separated, unquoted.  `%v` is
+    not a Python conversion at all, so the old message raised ValueError."""
+    return "[%s]" % " ".join(str(v) for v in values)
+
+
+def _digest_hex(value: Any) -> str:
+    """Go's `%x` on a digest's raw bytes: the reference prints hex, not the
+    base64 carrier that JSON carries them in."""
+    if not isinstance(value, str):
+        return ""
+    try:
+        raw = base64.b64decode(value + "=" * (-len(value) % 4))
+    except Exception:
+        return ""
+    return raw.hex()
+
+
 def validate_capability_id(cid: str) -> None:
     """Validate a capability ID against CLC-v1 §2 grammar."""
     if not cid:
@@ -403,20 +463,44 @@ def canonical_json(value: Any) -> str:
     raise CanonicalJSONError('canonical_unexpected_type: %s' % type(value).__name__)
 
 
-def compute_action_id(action_type: str, material_fields, suite: str,
-                      action: dict) -> str:
+def compute_action_id(action_type, material_fields=None, suite=None,
+                      action=None) -> str:
     """§4.3 ActionId over the declared material projection:
     `clc-action:1:<type>:<suite>:<b64url(sha256(JCS(projection)))>`.  A declared
-    field that is absent makes the action non-matchable."""
-    projection = {}
-    for field in material_fields:
-        if field not in action:
-            raise CanonicalJSONError('action_not_matchable: %s' % field)
-        projection[field] = action[field]
-    digest = hashlib.sha256(canonical_json(projection).encode('utf-8')).digest()
-    return 'clc-action:1:%s:%s:%s' % (
-        action_type, suite,
-        base64.urlsafe_b64encode(digest).rstrip(b'=').decode('ascii'))
+    field that is absent makes the action non-matchable.
+
+    Two call layouts are accepted and produce identical bytes:
+
+    - Go reference form — `compute_action_id(def, suite, action)`, where `def`
+      is an ActionTypeDefinition object;
+    - this demo's historical form —
+      `compute_action_id(action_type, material_fields, suite, action)`.
+    """
+    if isinstance(action_type, dict):
+        # Go layout binds the definition to the first parameter, the suite to
+        # the second and the action to the third; capture them before
+        # overwriting anything.
+        definition = action_type
+        go_suite = material_fields
+        go_action = suite
+        action_type = definition["type"]
+        material_fields = definition.get("material_fields")
+        suite = go_suite
+        action = go_action
+    # Go `ComputeActionID` dispatches through MaterialProjection (which
+    # validates the type definition) and then through the suite-pinned hash, so
+    # an unknown suite or an unmatchable projection is refused here too.
+    definition = action_type_definition(action_type, material_fields)
+    validate_action_type_definition(definition)
+    if not _suite_valid(suite):
+        raise ActionSuite('action_suite: %s' % _q(suite))
+    projection = material_projection(definition, action)
+    canonical = canonical_json(projection).encode('utf-8')
+    digest = hashlib.sha256(canonical).digest()
+    return action_id_string(action_id(
+        definition["type"], suite,
+        {"alg": _digest_alg_of(suite),
+         "value": base64.urlsafe_b64encode(digest).rstrip(b'=').decode('ascii')}))
 
 
 def _parse_revision(rev: str) -> tuple[Optional[int], Optional[int]]:
@@ -611,7 +695,7 @@ def validate_raw_params(raw: str) -> None:
 
     if dup_key:
         raise InvalidParamsDuplicateKey(
-            f"invalid_params_duplicate_key: {dup_key[0]}"
+            "invalid_params_duplicate_key: %s" % _q(dup_key[0])
         )
     if bad_numbers:
         raise InvalidParamsNumber(f"invalid_params_number: {bad_numbers[0]}")
@@ -2270,3 +2354,1789 @@ def contains_with_domains(parent, child, parent_dm, child_dm):
     if reason:
         return {"contains": False, "reason": "params_not_narrower"}
     return contains({**parent, "params": pp}, {**child, "params": cp})
+
+
+# =============================================================================
+# Go-parity layer — 1:1 port of the Go reference implementation
+# (`register/semantics`, CLC-1.19).  Function names, argument order, reason
+# strings and layer precedence mirror the Go exports; only the error carrier
+# differs (Go returns `error`, Python raises CLCError).
+# =============================================================================
+
+
+# --- register/semantics/semantics.go: ValidateGrantParams / ---              |
+#     ValidateOperationParams / ConstraintWithin                              |
+
+class InvalidParamsAbsent(CLCError):
+    pass
+
+
+def validate_grant_params(params: Optional[dict]) -> None:
+    """Go `ValidateGrantParams`: null-value check (§5.2) plus the §6.2 step 4
+    caps on the decoded-object path (§6.2 step 6)."""
+    validate_params(params)
+
+
+def validate_operation_params(params: Optional[dict]) -> None:
+    """Go `ValidateOperationParams`: identical body to ValidateGrantParams —
+    both entry points MUST reject the caps."""
+    validate_params(params)
+
+
+def constraint_within(value: Any, bound: Any) -> None:
+    """Go `ConstraintWithin(value, bound) error`.
+
+    Publication-boundary check: a rule's constraint value must not exceed the
+    signer's constraint value, using the same JSON subset semantic as §5.2
+    valueSubset.  A bound of None is nominal (any value accepted); an
+    explicitly empty bound ({} or []) denies the class, exactly like §5.2.
+    """
+    if value is None:
+        raise InvalidParamsNull("invalid_params_null")
+    if bound is None:
+        return None
+    ok, reason = value_subset(value, bound)
+    if not ok:
+        raise CLCError(reason)
+    return None
+
+
+# --- register/semantics/obligations.go ---------------------------------------
+
+class ObligationUnknown(CLCError):
+    pass
+
+
+class ObligationShape(CLCError):
+    pass
+
+
+# §3 scheme grammar, shared with capability ids (P7: one definition, consumed
+# everywhere).  Mirrors Go's `capabilitySchemeRE`.
+_CAPABILITY_SCHEME_RE = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9-]+-v[0-9]+$")
+
+
+def obligations(d: dict) -> list:
+    """Go `Obligations(d) []string` — an independent copy of the §8.4
+    obligation list (empty for deny and for a fully evaluated allow)."""
+    return list(d.get("unresolved") or [])
+
+
+def constraint_identity(c: str) -> str:
+    """Go `ConstraintIdentity(c) (string, error)` — the (scheme,type)
+    identity of a constraint.  A constraint that does not carry a parseable
+    identity cannot be dispatched to any evaluator, so it is reported as an
+    unknown obligation rather than passed along as text."""
+    parts = c.split(":")
+    if len(parts) < 2 or parts[0] == "" or parts[1] == "":
+        raise ObligationUnknown("obligation_unknown: %s" % _q(c))
+    if not _CAPABILITY_SCHEME_RE.match(parts[0]):
+        raise ObligationUnknown("obligation_unknown: %s" % _q(c))
+    for r in parts[1]:
+        if not (r.isascii() and (r.isalnum() or r in "-_")):
+            raise ObligationUnknown("obligation_unknown: %s" % _q(c))
+    return parts[0] + ":" + parts[1]
+
+
+def obligation_identities(d: dict) -> list:
+    """Go `ObligationIdentities(d) ([]string, error)` — the sorted,
+    deduplicated (scheme,type) identities of the decision's obligations."""
+    seen = set()
+    out = []
+    for c in obligations(d):
+        ident = constraint_identity(c)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(ident)
+    out.sort()
+    return out
+
+
+def check_decision_shape(d: dict) -> None:
+    """Go `checkDecisionShape(d) error` — enforces the §8.4 relation between
+    the verdict and the obligation list."""
+    ids = obligation_identities(d)
+    verdict = d.get("verdict")
+    if verdict in (VERDICT_ALLOW, VERDICT_DENY):
+        if len(ids) > 0:
+            raise ObligationShape("obligation_shape: verdict %s carries obligations %s" % (verdict, ids))
+    elif verdict == VERDICT_ALLOW_UNRESOLVED:
+        if len(ids) == 0:
+            raise ObligationShape("obligation_shape: allow_unresolved without obligations")
+    else:
+        raise ObligationShape('obligation_shape: unknown verdict %s' % _q(verdict))
+
+
+def discharge(d: dict, understood: list) -> None:
+    """Go `Discharge(d, understood) error` — whether a consumer may act.
+
+    A decision with no obligations always discharges.  Every obligation on an
+    allow_unresolved decision must be covered by `understood`; otherwise the
+    consumer must deny (XACML §2.13)."""
+    ids = obligation_identities(d)
+    check_decision_shape(d)
+    if d.get("verdict") != VERDICT_ALLOW_UNRESOLVED:
+        return None
+    have = set(understood)
+    for ident in ids:
+        if ident not in have:
+            raise ObligationUnknown(
+                # Go spells this one with %s, not %q — the constraint itself
+                # already appears quoted in the shape check above.
+                "obligation_unknown: %s (the consumer must understand, can and will discharge it)" % ident)
+    return None
+
+
+# --- register/semantics/combine.go -------------------------------------------
+
+class NoDecisions(CLCError):
+    pass
+
+
+class UnknownCombiningAlgorithm(CLCError):
+    pass
+
+
+class CombiningWouldDropObligations(CLCError):
+    pass
+
+
+COMBINING_DENY_OVERRIDES = "deny-overrides"
+COMBINING_PERMIT_OVERRIDES = "permit-overrides"
+COMBINING_FIRST_APPLICABLE = "first-applicable"
+DEFAULT_COMBINING_ALGORITHM = COMBINING_DENY_OVERRIDES
+
+_COMBINING_ALGORITHMS = {
+    COMBINING_DENY_OVERRIDES,
+    COMBINING_PERMIT_OVERRIDES,
+    COMBINING_FIRST_APPLICABLE,
+}
+
+
+def _has_obligations(decisions: list) -> bool:
+    return any(d.get("unresolved") for d in decisions)
+
+
+def _combine_deny_overrides(decisions: list) -> dict:
+    obligations_union: list = []
+    saw_allow = False
+    for d in decisions:
+        verdict = d.get("verdict")
+        if verdict == VERDICT_DENY:
+            # Deny wins outright; its reason is the reported one.
+            return {"verdict": VERDICT_DENY, "reason": d.get("reason", "")}
+        if verdict == VERDICT_ALLOW_UNRESOLVED:
+            obligations_union.extend(obligations(d))
+        elif verdict == VERDICT_ALLOW:
+            saw_allow = True
+    if obligations_union:
+        return {"verdict": VERDICT_ALLOW_UNRESOLVED, "unresolved": sorted(set(obligations_union))}
+    if saw_allow:
+        return {"verdict": VERDICT_ALLOW}
+    # Unreachable while the verdict set is closed, but the fallback must not
+    # be allow.
+    return {"verdict": VERDICT_DENY, "reason": "capability_not_authorized"}
+
+
+def _combine_permit_overrides(decisions: list) -> dict:
+    obligations_union: list = []
+    first_deny: Optional[dict] = None
+    for i, d in enumerate(decisions):
+        verdict = d.get("verdict")
+        if verdict == VERDICT_ALLOW:
+            # A later allow would drop the obligations already collected.
+            if obligations_union or _has_obligations(decisions[i + 1:]):
+                raise CombiningWouldDropObligations("combining_would_drop_obligations")
+            return {"verdict": VERDICT_ALLOW}
+        if verdict == VERDICT_ALLOW_UNRESOLVED:
+            obligations_union.extend(obligations(d))
+        elif verdict == VERDICT_DENY:
+            if first_deny is None:
+                first_deny = d
+    if first_deny is not None:
+        return {"verdict": VERDICT_DENY, "reason": first_deny.get("reason", "")}
+    if obligations_union:
+        return {"verdict": VERDICT_ALLOW_UNRESOLVED, "unresolved": sorted(set(obligations_union))}
+    return {"verdict": VERDICT_DENY, "reason": "capability_not_authorized"}
+
+
+def combine(algorithm: str, decisions: list) -> dict:
+    """Go `Combine(alg, decisions...) (Decision, error)`.
+
+    Applies a named combining algorithm to independently decided sources.
+    Every decision must satisfy the §8.4 shape; a malformed one fails closed.
+    """
+    if algorithm not in _COMBINING_ALGORITHMS:
+        raise UnknownCombiningAlgorithm("unknown_combining_algorithm: %s" % _q(algorithm))
+    if len(decisions) == 0:
+        raise NoDecisions("no_decisions")
+    for i, d in enumerate(decisions):
+        try:
+            check_decision_shape(d)
+        except CLCError as e:
+            raise type(e)("decision %d: %s" % (i, e))
+    if algorithm == COMBINING_FIRST_APPLICABLE:
+        return decisions[0]
+    if algorithm == COMBINING_PERMIT_OVERRIDES:
+        return _combine_permit_overrides(decisions)
+    return _combine_deny_overrides(decisions)
+
+
+# --- register/semantics/evidence.go ------------------------------------------
+
+class InvalidEvidenceConstraint(CLCError):
+    pass
+
+
+EVIDENCE_SCHEME = "varwof/evidence-v1"
+EVIDENCE_FRESHNESS = EVIDENCE_SCHEME + ":freshness"
+EVIDENCE_CONSUMPTION = EVIDENCE_SCHEME + ":consumption"
+EVIDENCE_QUORUM = EVIDENCE_SCHEME + ":quorum"
+EVIDENCE_EXCLUSION = EVIDENCE_SCHEME + ":exclusion"
+
+# Bounds max_age_sec so the seconds arithmetic below cannot wrap.  An absurdly
+# large age is a grammar error, not a wrap-around freshness answer.
+MAX_EVIDENCE_AGE_SECONDS = 1_000_000_000  # ~31.7 years
+
+EVIDENCE_SATISFIED = "satisfied"
+EVIDENCE_VIOLATED = "violated"
+EVIDENCE_UNKNOWN = "unknown"
+
+
+def evidence_fact(type_: str = "", subject: str = "", issued_at: str = "",
+                  verified: bool = False) -> dict:
+    """Go `EvidenceFact` — one natively verified artifact reduced to the fields
+    the core may evaluate over.  Presenter labels are not represented at all,
+    so they cannot be counted by accident."""
+    return {"type": type_, "subject": subject, "issued_at": issued_at,
+            "verified": verified}
+
+
+def validate_evidence_constraint(c: str) -> None:
+    """Go `ValidateEvidenceConstraint(c) error` — the closed value grammar of
+    the four evidence-side types.  An unrecognized (scheme,type) is an error,
+    never a silent pass."""
+    parts = c.split(":")
+    if len(parts) < 2:
+        raise InvalidEvidenceConstraint("invalid_evidence_constraint: %s" % _q(c))
+    identity = parts[0] + ":" + parts[1]
+    if identity == EVIDENCE_FRESHNESS:
+        if len(parts) != 4 or parts[2] != "sec":
+            raise InvalidEvidenceConstraint(
+                "invalid_evidence_constraint: %s (want %s:freshness:sec:<n>)" % (_q(c), EVIDENCE_SCHEME))
+        if not _is_strict_json_integer(parts[3]):
+            raise InvalidEvidenceConstraint(
+                "invalid_evidence_constraint: %s (max age must be a non-negative integer)" % (_q(c),))
+        if int(parts[3]) > MAX_EVIDENCE_AGE_SECONDS:
+            raise InvalidEvidenceConstraint(
+                "invalid_evidence_constraint: %s (max age exceeds %d seconds)" % (_q(c), MAX_EVIDENCE_AGE_SECONDS))
+    elif identity == EVIDENCE_CONSUMPTION:
+        if len(parts) != 3 or parts[2] != "once":
+            raise InvalidEvidenceConstraint(
+                "invalid_evidence_constraint: %s (want %s:consumption:once)" % (_q(c), EVIDENCE_SCHEME))
+    elif identity == EVIDENCE_QUORUM:
+        if len(parts) != 4 or parts[2] != "distinct":
+            raise InvalidEvidenceConstraint(
+                "invalid_evidence_constraint: %s (want %s:quorum:distinct:<n>)" % (_q(c), EVIDENCE_SCHEME))
+        if not _is_strict_json_integer(parts[3]):
+            raise InvalidEvidenceConstraint(
+                "invalid_evidence_constraint: %s (a quorum is greater than one)" % (_q(c),))
+        if int(parts[3]) < 2:
+            raise InvalidEvidenceConstraint(
+                "invalid_evidence_constraint: %s (a quorum is greater than one)" % (_q(c),))
+    elif identity == EVIDENCE_EXCLUSION:
+        if len(parts) != 3 or parts[2] not in ("initiator", "executor"):
+            raise InvalidEvidenceConstraint(
+                "invalid_evidence_constraint: %s (want %s:exclusion:initiator|executor)" % (_q(c), EVIDENCE_SCHEME))
+    else:
+        raise InvalidEvidenceConstraint("invalid_evidence_constraint: %s" % _q(c))
+    return None
+
+
+def _evidence_eligible(facts: list) -> list:
+    """Go `eligible` — keeps the facts a verifier actually established
+    (AEC §9.4.f: only eligible components contribute)."""
+    return [f for f in facts if f.get("verified") is True]
+
+
+def _distinct_subjects(facts: list) -> set:
+    """Go `distinctSubjects` — counts integrity-protected subject identifiers.
+    An empty subject is ineligible."""
+    return {f.get("subject") for f in _evidence_eligible(facts) if f.get("subject")}
+
+
+_UTC_SUFFIX_RE = re.compile(r"Z$", re.IGNORECASE)
+
+
+def _is_utc_instant(s: Any) -> bool:
+    """Go's `Location() != time.UTC` test, in the string form the ports hold
+    the instant in: only a trailing Z reads as UTC.  `+00:00` names a fixed
+    offset, not UTC, and encodes differently."""
+    if not isinstance(s, str) or not _RFC3339_RE.fullmatch(s):
+        return False
+    return _UTC_SUFFIX_RE.search(s) is not None
+
+
+def _parse_rfc3339(s: Any):
+    """Go's `time.Time` JSON handling: a strict RFC3339 instant with an offset.
+    A naive (offset-less) or unparseable stamp is not an instant, so it is None
+    rather than a silently-localized one."""
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        t = datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if t.tzinfo is None:
+        return None
+    return t
+
+
+def _parse_utc(s: Any):
+    """An RFC3339 instant normalized to UTC (the same instant, `astimezone`
+    rather than a `replace`, so an offset-stamped value keeps its meaning)."""
+    t = _parse_rfc3339(s)
+    return None if t is None else t.astimezone(datetime.timezone.utc)
+
+
+# Go's zero `time.Time` (year 1).  A context that pinned no clock reads as this
+# instant, which is how the freshness comparisons below fail closed.
+_ZERO_TIME = datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+
+
+def evaluate_evidence_constraint(c: str, facts: list, ctx: Optional[dict] = None) -> dict:
+    """Go `EvaluateEvidenceConstraint(c, facts, ctx) (EvidenceEvaluation, error)`.
+
+    Evaluates one evidence constraint over the eligible facts of a single
+    evidence role.  A malformed constraint raises; a recognized-but-external
+    one returns verdict=unknown with reason `evidence_not_core_evaluated`.
+    """
+    ctx = ctx or {}
+    validate_evidence_constraint(c)
+    parts = c.split(":")
+    out = {"constraint": c}
+
+    identity = parts[0] + ":" + parts[1]
+    if identity == EVIDENCE_FRESHNESS:
+        max_age = int(parts[3])
+        # Go takes `ctx.Now` from the caller; an absent clock reads as the zero
+        # instant, which makes any real issuance "future" — fail closed, never
+        # a silent pass.
+        now = _parse_utc(ctx.get("now")) or _ZERO_TIME
+        fs = _evidence_eligible(facts)
+        for f in fs:
+            t = _parse_utc(f.get("issued_at"))
+            if t is None:
+                out["verdict"], out["reason"] = EVIDENCE_VIOLATED, "freshness:no_issuance_time"
+                return out
+            if t > now:
+                out["verdict"], out["reason"] = EVIDENCE_VIOLATED, "freshness:future_issued"
+                return out
+            if (now - t).total_seconds() > max_age:
+                out["verdict"], out["reason"] = EVIDENCE_VIOLATED, "freshness:stale"
+                return out
+        if len(fs) == 0:
+            # Nothing eligible to be fresh: the requirement is unfilled.
+            out["verdict"], out["reason"] = EVIDENCE_VIOLATED, "freshness:no_eligible_fact"
+            return out
+        out["verdict"] = EVIDENCE_SATISFIED
+        return out
+
+    if identity == EVIDENCE_QUORUM:
+        threshold = int(parts[3])
+        distinct = _distinct_subjects(facts)
+        if len(distinct) < threshold:
+            out["verdict"] = EVIDENCE_VIOLATED
+            out["reason"] = "quorum:distinct_subjects=%d<threshold=%d" % (len(distinct), threshold)
+            return out
+        out["verdict"] = EVIDENCE_SATISFIED
+        return out
+
+    if identity == EVIDENCE_EXCLUSION:
+        who = parts[2]
+        excluded = ctx.get("initiator" if who == "initiator" else "executor")
+        if not excluded:
+            # The boundary-owned identity was not supplied.  Absence is never
+            # "not excluded": exclusion cannot be established, so it is unknown.
+            out["verdict"], out["reason"] = EVIDENCE_UNKNOWN, "exclusion:identity_not_supplied"
+            return out
+        for subject in _distinct_subjects(facts):
+            if subject == excluded:
+                out["verdict"], out["reason"] = EVIDENCE_VIOLATED, "exclusion:%s_is_approver" % who
+                return out
+        out["verdict"] = EVIDENCE_SATISFIED
+        return out
+
+    # evidenceConsumption: durable one-time state lives at the enforcement
+    # point; the core must not answer it.  Reported as a residual obligation,
+    # never as satisfied.
+    out["verdict"], out["reason"] = EVIDENCE_UNKNOWN, "evidence_not_core_evaluated"
+    return out
+
+
+def core_evaluates_evidence_constraint(c: str) -> bool:
+    """Go `CoreEvaluatesEvidenceConstraint(c) bool` — whether this revision has
+    an evaluator for the constraint.  Unrecognized constraints report False."""
+    try:
+        validate_evidence_constraint(c)
+    except CLCError:
+        return False
+    parts = c.split(":")
+    return parts[0] + ":" + parts[1] != EVIDENCE_CONSUMPTION
+
+
+def evidence_facts_of_role(facts: list, role: str) -> list:
+    """Go `EvidenceFactsOfRole(facts, role) []EvidenceFact` — selects the facts
+    filling one evidence role; callers scope first and evaluate second."""
+    return [f for f in facts if f.get("type") == role]
+
+
+# --- register/semantics/record.go --------------------------------------------
+#
+# Representation note (Python): Go carries `Digest.Value` as `[]byte`, which
+# json.Marshal renders as standard base64 with padding.  This port therefore
+# carries the digest value as that same base64 text, so a canonical
+# re-encoding of a record is byte-identical to Go's and round-trips without a
+# lossy bytes<->str step.
+
+RECORD_LANG = "clc-v1"
+DIGEST_ALG_SHA256 = "sha-256"
+
+
+def digest(alg: str = DIGEST_ALG_SHA256, value: Any = "") -> dict:
+    """Go `Digest` — a hash over a canonical byte string.  `value` is the
+    standard-base64 text of the digest bytes."""
+    return {"alg": alg, "value": value}
+
+
+def digest_equal(d: dict, other: dict) -> bool:
+    """Go `(Digest) Equal(o)`."""
+    return d.get("alg") == other.get("alg") and d.get("value") == other.get("value")
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def digest_of(value: Any) -> dict:
+    """Go `DigestOf(v) (Digest, error)` — the SHA-256 of v's canonical (JCS,
+    RFC 8785) JSON encoding."""
+    raw = canonical_json(value).encode("utf-8")
+    return {"alg": DIGEST_ALG_SHA256, "value": _b64(hashlib.sha256(raw).digest())}
+
+
+def digest_of_canonical(canonical: Any) -> dict:
+    """Go `DigestOfCanonical(canonical []byte) Digest` — hashes bytes already
+    known to be canonical, so Record does not encode the inputs twice."""
+    if isinstance(canonical, str):
+        canonical = canonical.encode("utf-8")
+    return {"alg": DIGEST_ALG_SHA256, "value": _b64(hashlib.sha256(canonical).digest())}
+
+
+def digest_usable(d: Optional[dict]) -> bool:
+    """Go `digestUsable(d) bool` — an algorithm tag and a non-empty value."""
+    return bool(d) and bool(d.get("alg")) and bool(d.get("value"))
+
+
+def _digest_hex(value: Any) -> str:
+    """The hex form of a digest value — Go's `hex.EncodeToString(d.Value)`.
+
+    A value that is not decodable base64 is keyed literally: it can never equal
+    a valid digest's key, so a malformed digest stays refused rather than
+    silently colliding with a real one.
+    """
+    if not isinstance(value, str) or value == "":
+        return str(value)
+    try:
+        # The urlsafe decoder accepts both the standard and the urlsafe
+        # alphabet, so hex-identical digests key identically regardless of which
+        # spelling produced them.
+        raw = base64.urlsafe_b64decode(_b64_pad(value))
+    except Exception:
+        return value
+    v = value.rstrip("=")
+    if (base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") != v
+            and base64.b64encode(raw).decode("ascii").rstrip("=") != v):
+        # A stray non-alphabet character would have been silently discarded;
+        # refuse the value instead of letting two digests share a key.
+        return value
+    return raw.hex()
+
+
+def _b64_pad(s: str) -> str:
+    return s + "=" * (-len(s) % 4)
+
+
+def digest_key(d: dict) -> str:
+    """Go `digestKey(d) string` — `alg + ":" + hex(value)`."""
+    return "%s:%s" % (d.get("alg", ""), _digest_hex(d.get("value", "")))
+
+
+def digest_from_hex(alg: str, hexvalue: str) -> dict:
+    """Helper: build a Digest from the hex form used by in-toto subjects."""
+    return {"alg": alg, "value": _b64(bytes.fromhex(hexvalue))}
+
+
+# --- register/semantics/context.go -------------------------------------------
+
+def epoch_id_of(v: int) -> int:
+    """Go `EpochIDOf(v uint64) *uint64`.
+
+    Go uses a pointer so a legitimate epoch id of zero is distinguishable from
+    "not used"; Python carries that distinction as the literal `0` versus an
+    absent key, so the function is an identity with the documented contract."""
+    return v
+
+
+def decision_context(at: str = "", max_age_sec: int = 0, nonce: str = "",
+                     epoch_id: Any = None, snapshot_digest: Optional[dict] = None) -> dict:
+    """Go `DecisionContext` — the freshness input a relying party pins for one
+    decision (RATS §10).  At least one mechanism must be present."""
+    ctx = {"at": at, "max_age_sec": max_age_sec, "nonce": nonce}
+    if epoch_id is not None:
+        ctx["epoch_id"] = epoch_id
+    if snapshot_digest is not None:
+        ctx["snapshot_digest"] = snapshot_digest
+    return ctx
+
+
+# Go's zero `time.Time` as encoding/json spells it: `At` is a struct, so it is
+# written even when nothing pinned it.
+ZERO_TIME_INSTANT = "0001-01-01T00:00:00Z"
+
+
+def context_is_zero(ctx: dict) -> bool:
+    """Go `(DecisionContext) IsZero() bool` — pins no freshness mechanism.
+
+    `At` is a `time.Time`, so Go's JSON encoding always writes it: a context
+    that pinned no clock reads back as year 1's zero instant, which must not be
+    mistaken for a pinned `at`."""
+    raw = ctx.get("at")
+    if not raw:
+        at_is_zero = True
+    else:
+        parsed = _parse_utc(raw)
+        at_is_zero = parsed is not None and parsed == _ZERO_TIME
+    return at_is_zero and not ctx.get("nonce") and ctx.get("epoch_id") is None
+
+
+def validate_decision_context(ctx: dict) -> None:
+    """Go `(DecisionContext) Validate() error`."""
+    if ctx.get("max_age_sec", 0) < 0:
+        raise CLCError("context_shape: negative max_age_sec")
+    if ctx.get("max_age_sec", 0) > 0 and not ctx.get("at"):
+        raise CLCError("context_shape: max_age_sec without at")
+    if context_is_zero(ctx):
+        raise CLCError("context_missing")
+    at = _parse_utc(ctx.get("at"))
+    if ctx.get("at") and at is None:
+        raise CLCError("context_not_utc: at carries an unparseable instant")
+    # Go compares `At.Location() != time.UTC`: the same moment written with a
+    # fixed offset encodes differently, and would change a record's input
+    # digest.  Only a trailing Z reads as UTC.
+    if ctx.get("at") and not _is_utc_instant(ctx.get("at")):
+        raise CLCError("context_not_utc: at carries location ")
+    if ctx.get("snapshot_digest") is not None:
+        d = ctx["snapshot_digest"]
+        if not d.get("alg") or not d.get("value"):
+            raise CLCError("context_shape: incomplete snapshot digest")
+    if ctx.get("nonce") and len(ctx["nonce"].encode("utf-8")) > MAX_CONTEXT_NONCE_BYTES:
+        raise CLCError("context_shape: nonce longer than %d bytes" % MAX_CONTEXT_NONCE_BYTES)
+    return None
+
+
+# Bounds a nonce the same way §6.2 bounds other inputs, so a hostile peer
+# cannot inflate the record.
+MAX_CONTEXT_NONCE_BYTES = 512
+
+
+def fresh_context(ctx: dict, now: str) -> None:
+    """Go `(DecisionContext) Fresh(now time.Time) error`.
+
+    `now` is supplied by the caller (the core never reads a clock).  A context
+    that pinned only a nonce or an epoch id has no clock claim to check: this
+    raises `context_no_clock` rather than passing.
+    """
+    validate_decision_context(ctx)
+    at = _parse_utc(ctx.get("at"))
+    if at is None:
+        raise CLCError("context_no_clock")
+    when = _parse_utc(now)
+    if when is None:
+        raise CLCError("invalid_timestamp")
+    if when < at:
+        raise CLCError("context_future: context at %s, checking instant %s" % (ctx.get("at"), now))
+    max_age = int(ctx.get("max_age_sec") or 0)
+    if max_age > 0:
+        age = (when - at).total_seconds()
+        if age > max_age:
+            raise CLCError("context_stale: age %s exceeds %s"
+                           % (_fmt_duration(age), _fmt_duration(max_age)))
+    return None
+
+
+def context_digest(ctx: dict) -> dict:
+    """Go `(DecisionContext) Digest() (Digest, error)` — binds the context so a
+    record can identify exactly which freshness input it was decided under."""
+    validate_decision_context(ctx)
+    return digest_of(_context_wire(ctx))
+
+
+# --- register/semantics/sources.go -------------------------------------------
+
+def _references_digest(refs: list, want: dict) -> bool:
+    return any(digest_equal(r, want) for r in (refs or []))
+
+
+def _detect_cycle(by_digest: dict, edges: dict) -> None:
+    WHITE, GREY, BLACK = 0, 1, 2
+    color = {}
+
+    def visit(node: str) -> None:
+        color[node] = GREY
+        for nxt in edges.get(node, []):
+            state = color.get(nxt, WHITE)
+            if state == GREY:
+                raise CLCError("source_chain_cycle: %s" % by_digest[nxt].get("id"))
+            if state == WHITE:
+                visit(nxt)
+        color[node] = BLACK
+
+    for node in edges:
+        if color.get(node, WHITE) == WHITE:
+            visit(node)
+
+
+def validate_source_chain(chain: dict) -> None:
+    """Go `(SourceChain) Validate() error` — the chain's structure and, in
+    particular, that every claimed relation is backed by the source's own
+    references."""
+    sources = chain.get("sources") or []
+    if len(sources) == 0:
+        raise CLCError("source_chain_empty")
+    by_digest = {}
+    for s in sources:
+        if not s.get("kind") or not s.get("id"):
+            raise CLCError('source_shape: kind/id required (got "%s"/"%s")' % (s.get("kind", ""), s.get("id", "")))
+        if not digest_usable(s.get("digest")):
+            raise CLCError("source_shape: source %s/%s has no usable digest" % (s.get("kind"), s.get("id")))
+        key = digest_key(s["digest"])
+        if key in by_digest:
+            raise CLCError("source_duplicate: %s" % key)
+        by_digest[key] = s
+
+    edges: dict = {}
+    for l in chain.get("links") or []:
+        from_key, to_key = digest_key(l.get("from", {})), digest_key(l.get("to", {}))
+        src, ok_from = by_digest.get(from_key), from_key in by_digest
+        dst, ok_to = by_digest.get(to_key), to_key in by_digest
+        if not ok_from or not ok_to:
+            raise CLCError("source_dangling_link: %s -> %s" % (from_key, to_key))
+        if not _references_digest(src.get("references"), dst["digest"]):
+            raise CLCError("source_edge_unbacked: %s does not name %s" % (src.get("id"), dst.get("id")))
+        edges.setdefault(from_key, []).append(to_key)
+
+    _detect_cycle(by_digest, edges)
+    return None
+
+
+def source_chain_digest(chain: dict) -> dict:
+    """Go `(SourceChain) Digest() (Digest, error)` — the sorted node identities
+    plus the sorted links, hashed, never the inline material."""
+    validate_source_chain(chain)
+    # Go builds `nodeID{kind,id,alg,hex(value)}` and sorts on the hex value, so
+    # the sort key and the hashed bytes are both hex here.
+    nodes = [{"kind": s.get("kind"), "id": s.get("id"),
+              "alg": s["digest"].get("alg"), "value": _digest_hex(s["digest"].get("value"))}
+             for s in chain.get("sources") or []]
+    nodes.sort(key=lambda n: (n["kind"], n["id"], n["value"]))
+    links = sorted("%s->%s" % (digest_key(l.get("from", {})), digest_key(l.get("to", {})))
+                   for l in (chain.get("links") or []))
+    payload = {"sources": nodes}
+    if links:
+        payload["links"] = links
+    return digest_of(payload)
+
+
+def standing_on(chain: dict, from_digest: dict) -> list:
+    """Go `(SourceChain) StandingOn(from Digest) ([]SourceRef, error)`.
+
+    The walk follows the "artifact names authority" direction, so it returns
+    the artifact first and ends at a source that names nothing.  A source that
+    names more than one other source in the chain has no single path.
+    """
+    validate_source_chain(chain)
+    by_digest = {digest_key(s["digest"]): s for s in chain.get("sources") or []}
+    named: dict = {}
+    for l in chain.get("links") or []:
+        named.setdefault(digest_key(l.get("from", {})), []).append(
+            by_digest[digest_key(l.get("to", {}))])
+
+    key = digest_key(from_digest)
+    if key not in by_digest:
+        raise CLCError("source_dangling_link: %s" % key)
+    current = by_digest[key]
+    path: list = []
+    seen = set()
+    while True:
+        key = digest_key(current["digest"])
+        if key in seen:
+            raise CLCError("source_chain_cycle: %s" % current.get("id"))
+        seen.add(key)
+        path.append(current)
+        nxt = named.get(key, [])
+        if len(nxt) == 0:
+            return path
+        if len(nxt) == 1:
+            current = nxt[0]
+            continue
+        raise CLCError("source_chain_branch: %s names %d sources" % (current.get("id"), len(nxt)))
+
+
+# --- register/semantics/record.go (record construction) ----------------------
+
+class RecordOperationCount(CLCError):
+    pass
+
+
+class RecordInputDigestMismatch(CLCError):
+    pass
+
+
+class RecordVerdictMismatch(CLCError):
+    pass
+
+
+class RecordRevision(CLCError):
+    pass
+
+
+def _grant_wire(g: dict) -> dict:
+    """Go's `Grant` JSON: only the declared members exist, and the optional ones
+    carry `,omitempty`, so a null or empty `params` is not written at all.  The
+    record hashes the bytes a Go holder would have written."""
+    out = {"id": g.get("id", "")}
+    if g.get("params"):
+        out["params"] = g["params"]
+    if g.get("param_bounds"):
+        out["param_bounds"] = g["param_bounds"]
+    if g.get("constraints"):
+        out["constraints"] = list(g["constraints"])
+    return out
+
+
+def _operation_wire(op: dict) -> dict:
+    out = {"id": op.get("id", "")}
+    if op.get("params"):
+        out["params"] = op["params"]
+    return out
+
+
+def _context_wire(ctx: dict) -> dict:
+    """Go's `DecisionContext` JSON.  `At` is a `time.Time` struct, which
+    encoding/json never omits, so a context without a pinned instant still
+    carries year 1's zero time."""
+    out = {"at": ctx.get("at") or ZERO_TIME_INSTANT}
+    if ctx.get("max_age_sec"):
+        out["max_age_sec"] = ctx["max_age_sec"]
+    if ctx.get("nonce"):
+        out["nonce"] = ctx["nonce"]
+    if ctx.get("epoch_id") is not None:
+        out["epoch_id"] = ctx["epoch_id"]
+    if ctx.get("snapshot_digest") is not None:
+        out["snapshot_digest"] = ctx["snapshot_digest"]
+    return out
+
+
+def _digest_wire(d: Any) -> dict:
+    d = d or {}
+    return {"alg": d.get("alg", ""), "value": d.get("value")}
+
+
+def _ref_wire(r: dict) -> dict:
+    out = {"kind": r.get("kind", ""), "id": r.get("id", "")}
+    if r.get("issuer"):
+        out["issuer"] = r["issuer"]
+    out["digest"] = _digest_wire(r.get("digest"))
+    if r.get("references"):
+        out["references"] = [_digest_wire(x) for x in r["references"]]
+    return out
+
+
+def _sources_wire(ch: dict) -> dict:
+    out = {"sources": [_ref_wire(r) for r in ch.get("sources") or []]}
+    if ch.get("links"):
+        out["links"] = [{"from": _digest_wire(l.get("from")),
+                         "to": _digest_wire(l.get("to"))}
+                        for l in ch["links"]]
+    return out
+
+
+def record_inputs(grants: list, op: dict, context: Optional[dict] = None,
+                  sources: Optional[dict] = None,
+                  requirement_digest: Optional[dict] = None) -> dict:
+    """Go `RecordInputs` — the frozen input of a decision.  The field names are
+    the record's public schema, not an internal detail."""
+    out = {"grants": [_grant_wire(g) for g in grants],
+           "operations": [_operation_wire(op)]}
+    if context is not None:
+        out["context"] = _context_wire(context)
+    if sources is not None:
+        out["sources"] = _sources_wire(sources)
+    if requirement_digest is not None:
+        out["requirement_digest"] = requirement_digest
+    return out
+
+
+def _record(grants: list, op: dict, context: Optional[dict] = None,
+            sources: Optional[dict] = None,
+            requirement: Optional[dict] = None) -> dict:
+    """Go `record(grants, op, opts, requirementDigest) (DecisionRecord, error)`.
+
+    The verdict/reason/unresolved are copied from AuthorizeSet unchanged, never
+    recomputed or reworded here.
+    """
+    if not grants:
+        # Normalize before encoding: a nil slice would encode as null and then
+        # hash differently from the empty list it decodes back to.
+        grants = []
+    req_digest = None
+    if requirement is not None:
+        req_digest = requirement_digest(requirement)
+    inputs = record_inputs(grants, op, context, sources, req_digest)
+    canonical = canonical_json(inputs)
+    frozen = json.loads(canonical)
+    frozen.setdefault("grants", [])
+    if frozen["grants"] is None:
+        frozen["grants"] = []
+
+    rec = {
+        "ver": CLC_REVISION,
+        "lang": RECORD_LANG,
+        "inputs": frozen,
+        "input_digest": digest_of_canonical(canonical),
+    }
+    decision = authorize_set(frozen["grants"], frozen["operations"][0])
+    rec["verdict"] = decision.get("verdict")
+    if decision.get("reason"):
+        rec["reason"] = decision.get("reason")
+    unresolved = list(decision.get("unresolved") or [])
+    # `RecordConstraints.Unresolved` is `,omitempty`: an empty residual channel
+    # writes as `{}` and never as `{"unresolved": []}`.
+    rec["constraints"] = {"unresolved": unresolved} if unresolved else {}
+    return rec
+
+
+def record_with(grants: list, op: dict, context: Optional[dict] = None,
+                sources: Optional[dict] = None,
+                requirement: Optional[dict] = None) -> dict:
+    """Go `RecordWith(grants, op, opts) (DecisionRecord, error)`.
+
+    Both the freshness context and the authorization source chain are validated
+    before anything is written: a chain whose claimed relations its own bytes do
+    not back is refused, not recorded.
+    """
+    if context is not None:
+        validate_decision_context(context)
+    if sources is not None:
+        validate_source_chain(sources)
+    return _record(grants, op, context, sources, requirement)
+
+
+def record(grants: list, op: dict) -> dict:
+    """Go `Record(grants, op) (DecisionRecord, error)`."""
+    return record_with(grants, op)
+
+
+def record_with_context(grants: list, op: dict, ctx: dict) -> dict:
+    """Go `RecordWithContext(grants, op, ctx) (DecisionRecord, error)`."""
+    return record_with(grants, op, context=ctx)
+
+
+def record_canonical_bytes(rec: dict) -> str:
+    """Go `(DecisionRecord) CanonicalBytes() ([]byte, error)` — the stable
+    handle a later step signs, or compares between implementations."""
+    return canonical_json(rec)
+
+
+def record_recompute(rec: dict) -> dict:
+    """Go `(DecisionRecord) Recompute() (Decision, error)` — re-runs the
+    language over the record's frozen inputs.  It needs nothing outside the
+    record."""
+    operations = rec.get("inputs", {}).get("operations") or []
+    if len(operations) != 1:
+        raise RecordOperationCount("record_operation_count: %d operations" % len(operations))
+    if not revision_compatible(rec.get("ver")):
+        raise RecordRevision("record_unsupported_revision: %s" % rec.get("ver"))
+    return authorize_set(rec["inputs"].get("grants") or [], operations[0])
+
+
+def record_verify(rec: dict) -> None:
+    """Go `(DecisionRecord) Verify() error` — the digest must match the frozen
+    inputs, and re-running the language must reproduce the verdict, reason and
+    residual obligations byte for byte."""
+    recomputed = record_recompute(rec)
+    want = digest_of(rec["inputs"])
+    recorded = rec.get("input_digest") or {}
+    if not digest_equal(want, recorded):
+        raise RecordInputDigestMismatch(
+            "record_input_digest_mismatch: recorded %s/%s, recomputed %s/%s" % (
+                recorded.get("alg", ""), _digest_hex(recorded.get("value", "")),
+                want.get("alg"), _digest_hex(want.get("value"))))
+    if recomputed.get("verdict") != rec.get("verdict") or recomputed.get("reason", "") != rec.get("reason", ""):
+        raise RecordVerdictMismatch(
+            "record_verdict_mismatch: recorded %s/%s, recomputed %s/%s" % (
+                _q(rec.get("verdict")), _q(rec.get("reason", "")),
+                _q(recomputed.get("verdict")), _q(recomputed.get("reason", ""))))
+    got = list(rec.get("constraints", {}).get("unresolved") or [])
+    want_unresolved = list(recomputed.get("unresolved") or [])
+    if len(got) != len(want_unresolved) or any(a != b for a, b in zip(got, want_unresolved)):
+        raise RecordVerdictMismatch(
+            "record_verdict_mismatch: recorded unresolved %s, recomputed %s"
+            % (_go_str_list(got), _go_str_list(want_unresolved)))
+    return None
+
+
+def record_verify_as_of(rec: dict, now: str) -> None:
+    """Go `(DecisionRecord) VerifyAsOf(now) error` — additionally requires the
+    decision context to still be fresh at `now` (RATS §10)."""
+    record_verify(rec)
+    ctx = rec.get("inputs", {}).get("context")
+    if ctx is None:
+        raise CLCError("context_missing")
+    return fresh_context(ctx, now)
+
+
+# --- register/semantics/requirement.go ---------------------------------------
+
+class RequirementShape(CLCError):
+    pass
+
+
+class RequirementVersion(CLCError):
+    pass
+
+
+class RequirementExpression(CLCError):
+    pass
+
+
+REQUIREMENT_VERSION = "CLC-REQUIREMENT-v1"
+
+MAX_REQUIREMENT_EXPRESSION_BYTES = 512
+MAX_REQUIREMENT_NODES = 64
+MAX_REQUIREMENT_DEPTH = 8
+
+# Reason codes that are not already carried by a constraint evaluation.
+SATISFACTION_REASON_EXPRESSION_FALSE = "requirement:expression_false"
+SATISFACTION_REASON_UNSATISFIED = "requirement:unsatisfied"
+
+SATISFACTION_SATISFIED = "SATISFIED"
+SATISFACTION_UNSATISFIED = "UNSATISFIED"
+
+_REQUIREMENT_KNOWN_MEMBERS = {"@version", "requirement_id", "purpose", "expression", "constraints"}
+
+
+def _is_ident_byte(c: int) -> bool:
+    """Go `isIdentByte` — letters, digits and the separators . : - _."""
+    if 0x61 <= c <= 0x7A or 0x41 <= c <= 0x5A or 0x30 <= c <= 0x39:
+        return True
+    return c in (0x2E, 0x3A, 0x2D, 0x5F)
+
+
+def _tokenize_requirement(src: str) -> list:
+    """Go `tokenizeRequirement`."""
+    tokens: list = []
+    data = src.encode("utf-8")
+    i = 0
+    n = len(data)
+    while i < n:
+        c = data[i]
+        if c in (0x20, 0x09, 0x0A, 0x0D):
+            i += 1
+        elif c in (0x28, 0x29):  # ( )
+            tokens.append(chr(c))
+            i += 1
+        elif c in (0x26, 0x7C):  # & |
+            # The grammar's symbolic operators are doubled; a single one is
+            # not a token.
+            if i + 1 >= n or data[i + 1] != c:
+                raise RequirementExpression("requirement_expression: stray %s" % _q(chr(c)))
+            tokens.append(chr(c) * 2)
+            i += 2
+        elif _is_ident_byte(c):
+            start = i
+            while i < n and _is_ident_byte(data[i]):
+                i += 1
+            tokens.append(data[start:i].decode("utf-8"))
+        else:
+            raise RequirementExpression("requirement_expression: unexpected character %s" % _q(chr(c)))
+    if len(tokens) == 0:
+        raise RequirementExpression("requirement_expression: empty expression")
+    return tokens
+
+
+def _requirement_operator(tok: str) -> Optional[str]:
+    if tok in ("AND", "&&"):
+        return "AND"
+    if tok in ("OR", "||"):
+        return "OR"
+    return None
+
+
+class _RequirementParser:
+    """Go `requirementParser` — a bounded, left-to-right parser (AEC §8)."""
+
+    def __init__(self, tokens: list):
+        self.tokens = tokens
+        self.pos = 0
+        self.nodes = 0
+
+    def parse_expr(self, depth: int) -> dict:
+        if depth > MAX_REQUIREMENT_DEPTH:
+            raise RequirementShape("requirement_shape: nesting deeper than %d" % MAX_REQUIREMENT_DEPTH)
+        left = self.parse_term(depth)
+        while self.pos < len(self.tokens):
+            op = _requirement_operator(self.tokens[self.pos])
+            if op is None:
+                break
+            self.pos += 1
+            right = self.parse_term(depth)
+            self.nodes += 1
+            if self.nodes > MAX_REQUIREMENT_NODES:
+                raise RequirementShape("requirement_shape: more than %d terms" % MAX_REQUIREMENT_NODES)
+            left = {"op": op, "left": left, "right": right}
+        return left
+
+    def parse_term(self, depth: int) -> dict:
+        if self.pos >= len(self.tokens):
+            raise RequirementExpression("requirement_expression: unexpected end of expression")
+        tok = self.tokens[self.pos]
+        if tok == "(":
+            self.pos += 1
+            inner = self.parse_expr(depth + 1)
+            if self.pos >= len(self.tokens) or self.tokens[self.pos] != ")":
+                raise RequirementExpression("requirement_expression: missing )")
+            self.pos += 1
+            return inner
+        if tok == ")" or _requirement_operator(tok) is not None:
+            raise RequirementExpression('requirement_expression: expected a term, got "%s"' % tok)
+        self.pos += 1
+        return {"ident": tok}
+
+
+def _parse_requirement_expression(src: str) -> dict:
+    """Go `parseRequirementExpression(in) (*requirementExpr, error)`."""
+    if not src.strip():
+        raise RequirementExpression("requirement_expression: empty expression")
+    parser = _RequirementParser(_tokenize_requirement(src))
+    expr = parser.parse_expr(0)
+    if parser.pos != len(parser.tokens):
+        raise RequirementExpression('requirement_expression: unexpected "%s"' % parser.tokens[parser.pos])
+    return expr
+
+
+def _expr_eval(node: dict, present) -> bool:
+    """Go `(requirementExpr) eval(present)` — left-to-right, equal binding."""
+    if "op" not in node:
+        return present(node["ident"])
+    if node["op"] == "AND":
+        return _expr_eval(node["left"], present) and _expr_eval(node["right"], present)
+    return _expr_eval(node["left"], present) or _expr_eval(node["right"], present)
+
+
+def _expr_roles(node: dict, acc: set) -> None:
+    if "op" not in node:
+        acc.add(node["ident"])
+        return
+    _expr_roles(node["left"], acc)
+    _expr_roles(node["right"], acc)
+
+
+def validate_requirement(req: dict) -> None:
+    """Go `(Requirement) Validate() error` — the version, the identifiers, every
+    constraint's value grammar, and that the expression parses within the
+    bounded grammar."""
+    if req.get("@version") != REQUIREMENT_VERSION:
+        raise RequirementVersion('requirement_version: %s' % _q(req.get("@version")))
+    if not req.get("requirement_id"):
+        raise RequirementShape("requirement_shape: requirement_id required")
+    expression = req.get("expression") or ""
+    if len(expression.encode("utf-8")) > MAX_REQUIREMENT_EXPRESSION_BYTES:
+        raise RequirementShape("requirement_shape: expression longer than %d bytes" % MAX_REQUIREMENT_EXPRESSION_BYTES)
+    _parse_requirement_expression(expression)
+    seen = set()
+    for c in req.get("constraints") or []:
+        if not c.get("role"):
+            raise RequirementShape("requirement_shape: constraint without a role")
+        validate_evidence_constraint(c.get("constraint", ""))
+        key = c["role"] + "\x00" + c["constraint"]
+        if key in seen:
+            raise RequirementShape('requirement_shape: duplicate constraint for role "%s"' % c["role"])
+        seen.add(key)
+    return None
+
+
+def requirement_digest(req: dict) -> dict:
+    """Go `(Requirement) Digest() (Digest, error)` — the requirement profile
+    digest: the JCS digest of the complete object."""
+    validate_requirement(req)
+    return digest_of(req)
+
+
+def requirement_roles(req: dict) -> list:
+    """Go `(Requirement) Roles() ([]string, error)` — the sorted distinct role
+    identifiers the expression names."""
+    expr = _parse_requirement_expression(req.get("expression") or "")
+    acc: set = set()
+    _expr_roles(expr, acc)
+    return sorted(acc)
+
+
+def parse_requirement(raw: Any) -> dict:
+    """Go `ParseRequirement(raw []byte) (Requirement, error)`.
+
+    Decodes a requirement as a closed object: a member this revision does not
+    define is an error, never silently dropped."""
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8")
+    if isinstance(raw, str):
+        obj = json.loads(raw)
+    else:
+        obj = raw
+    if not isinstance(obj, dict):
+        raise RequirementShape("requirement_shape: not an object")
+    unknown = set(obj) - _REQUIREMENT_KNOWN_MEMBERS
+    if unknown:
+        # Go's decoder reports the first unknown member it reaches, spelled the
+        # way encoding/json spells it: `json: unknown field "extra"`.
+        raise RequirementShape('requirement_shape: json: unknown field %s'
+                               % _q(sorted(unknown)[0]))
+    validate_requirement(obj)
+    return obj
+
+
+def evaluate_requirement(req: dict, facts: list, ctx: Optional[dict] = None) -> dict:
+    """Go `EvaluateRequirement(req, facts, ctx) (RequirementResult, error)`.
+
+    Decides whether the presented facts fill the relying party's bar.  The
+    requirement must come from relying-party configuration: this function takes
+    it as an argument and never reads it from the evidence.
+
+    Precedence is violated > unknown > satisfied, so no failure degrades toward
+    admission.
+    """
+    ctx = ctx or {}
+    validate_requirement(req)
+    out = {"requirement_id": req.get("requirement_id"), "digest": requirement_digest(req)}
+
+    expr = _parse_requirement_expression(req.get("expression") or "")
+
+    def present(role: str) -> bool:
+        return any(f.get("verified") for f in evidence_facts_of_role(facts, role))
+
+    out["expression"] = _expr_eval(expr, present)
+    if not out["expression"]:
+        out["missing_roles"] = [r for r in requirement_roles(req) if not present(r)]
+
+    unknown = False
+    violated = False
+    evaluations: list = []
+    for c in req.get("constraints") or []:
+        evaluation = evaluate_evidence_constraint(
+            c["constraint"], evidence_facts_of_role(facts, c["role"]), ctx)
+        evaluations.append(evaluation)
+        if evaluation["verdict"] == EVIDENCE_VIOLATED:
+            violated = True
+        elif evaluation["verdict"] == EVIDENCE_UNKNOWN:
+            unknown = True
+    if evaluations:
+        out["constraints"] = evaluations
+
+    if violated or not out["expression"]:
+        out["verdict"] = EVIDENCE_VIOLATED
+    elif unknown:
+        out["verdict"] = EVIDENCE_UNKNOWN
+    else:
+        out["verdict"] = EVIDENCE_SATISFIED
+    return out
+
+
+def requirement_satisfied(result: dict) -> bool:
+    """Go `(RequirementResult) Satisfied() bool` — only an explicit satisfied
+    verdict counts, so "unknown" can never be read as "yes"."""
+    return result.get("verdict") == EVIDENCE_SATISFIED
+
+
+def requirement_satisfaction(result: dict) -> dict:
+    """Go `(RequirementResult) Satisfaction() Satisfaction` — §10's binary
+    report form."""
+    if result.get("verdict") == EVIDENCE_SATISFIED:
+        return {"verdict": SATISFACTION_SATISFIED}
+    if not result.get("expression"):
+        return {"verdict": SATISFACTION_UNSATISFIED, "reason": SATISFACTION_REASON_EXPRESSION_FALSE}
+    for c in result.get("constraints") or []:
+        if c.get("verdict") in (EVIDENCE_VIOLATED, EVIDENCE_UNKNOWN):
+            return {"verdict": SATISFACTION_UNSATISFIED, "reason": c.get("reason", "")}
+    return {"verdict": SATISFACTION_UNSATISFIED, "reason": SATISFACTION_REASON_UNSATISFIED}
+
+
+# --- register/semantics/challenge.go -----------------------------------------
+
+class ChallengeShape(CLCError):
+    pass
+
+
+class ChallengeExpired(CLCError):
+    pass
+
+
+class ChallengeNotOutstanding(CLCError):
+    pass
+
+
+class ChallengeRetryNotBefore(CLCError):
+    pass
+
+
+CHALLENGE_VERSION = "CLC-CHALLENGE-v1"
+
+MIN_CHALLENGE_NONCE_BYTES = 8
+MAX_CHALLENGE_NONCE_BYTES = 128
+MAX_CHALLENGE_JITTER_SEC = 300
+
+
+def _require_utc(s: Any, what: str) -> Any:
+    """A UTC instant, as Go requires: `Location() != time.UTC` is refused, and a
+    fixed offset — even `+00:00` — is not `time.UTC`."""
+    t = _parse_rfc3339(s)
+    if t is None or not _is_utc_instant(s):
+        raise ChallengeShape("challenge_shape: %s must be a UTC instant" % what)
+    return t
+
+
+def _require_expires(c: dict) -> Any:
+    """Go checks `ExpiresAt` in two steps: zero is `expires_at required`, and a
+    non-UTC instant is `expires_at must be UTC`."""
+    raw = c.get("expires_at")
+    if raw is None or raw == "":
+        raise ChallengeShape("challenge_shape: expires_at required")
+    t = _parse_rfc3339(raw)
+    if t is None or not _is_utc_instant(raw):
+        raise ChallengeShape("challenge_shape: expires_at must be UTC")
+    return t
+
+
+def _iso_utc(t) -> str:
+    """Go writes `time.Time` with RFC3339Nano: whole seconds have no fraction,
+    and a fractional part keeps its digits with trailing zeros trimmed."""
+    t = t.astimezone(datetime.timezone.utc)
+    if not t.microsecond:
+        return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return t.strftime("%Y-%m-%dT%H:%M:%S.%f").rstrip("0") + "Z"
+
+
+def challenge_authorizes(challenge: dict) -> bool:
+    """Go `(Challenge) Authorizes() bool` — always False; the method exists so
+    that call sites cannot read a challenge as a verdict by accident."""
+    return False
+
+
+def validate_challenge(c: dict) -> None:
+    """Go `(Challenge) Validate() error` — shape and bindings."""
+    if c.get("@version") != CHALLENGE_VERSION:
+        raise ChallengeShape('challenge_shape: version %s' % _q(c.get("@version")))
+    if not c.get("challenge_id"):
+        raise ChallengeShape("challenge_shape: challenge_id required")
+    n = len((c.get("nonce") or "").encode("utf-8"))
+    if n < MIN_CHALLENGE_NONCE_BYTES or n > MAX_CHALLENGE_NONCE_BYTES:
+        raise ChallengeShape("challenge_shape: nonce must be %d..%d bytes" % (
+            MIN_CHALLENGE_NONCE_BYTES, MAX_CHALLENGE_NONCE_BYTES))
+    if not digest_usable(c.get("action_digest")):
+        raise ChallengeShape("challenge_shape: action_digest required")
+    if c.get("requirement_digest") is not None and not digest_usable(c["requirement_digest"]):
+        raise ChallengeShape("challenge_shape: unusable requirement_digest")
+    if not c.get("required"):
+        raise ChallengeShape("challenge_shape: nothing required")
+    for item in c["required"]:
+        if not item.get("id"):
+            raise ChallengeShape("challenge_shape: required item without an id")
+    expires = _require_expires(c)
+    retry = c.get("retry_timing")
+    if retry is not None:
+        not_before = _require_utc(retry.get("not_before"), "retry_timing.not_before")
+        jitter = retry.get("jitter_sec", 0)
+        if jitter < 0 or jitter > MAX_CHALLENGE_JITTER_SEC:
+            raise ChallengeShape("challenge_shape: jitter_sec out of range")
+        if not_before > expires:
+            raise ChallengeShape("challenge_shape: retry_timing.not_before is after expiry")
+    return None
+
+
+def challenge_usable(c: dict, now: str) -> None:
+    """Go `(Challenge) Usable(now time.Time) error` — an expired challenge is
+    dead: retrying against it is the load amplification the specification
+    warns about."""
+    validate_challenge(c)
+    when = _require_utc(now, "now")
+    expires = _require_expires(c)
+    if not when < expires:
+        raise ChallengeExpired("challenge_expired: expired at %s" % c.get("expires_at"))
+    retry = c.get("retry_timing")
+    if retry is not None and when < _require_utc(retry.get("not_before"), "retry_timing.not_before"):
+        raise ChallengeRetryNotBefore(
+            'challenge_retry_not_before: opens at %s' % retry.get("not_before"))
+    return None
+
+
+def challenge_digest(c: dict) -> dict:
+    """Go `(Challenge) Digest() (Digest, error)` — binds the challenge so a
+    caller can identify exactly which challenge it answered."""
+    validate_challenge(c)
+    return digest_of(c)
+
+
+def _sorted_challenge_items(items: list) -> list:
+    return sorted(items, key=lambda i: (i.get("id", ""), i.get("constraint", ""), i.get("reason", "")))
+
+
+def _build_challenge(version_items: list, params: dict) -> dict:
+    c = {
+        "@version": CHALLENGE_VERSION,
+        "challenge_id": params.get("id", ""),
+        "nonce": params.get("nonce", ""),
+        "required": _sorted_challenge_items(version_items),
+        "expires_at": _iso_utc(_require_utc(params.get("now"), "now")
+                               + datetime.timedelta(seconds=int(params.get("ttl_sec") or 0))),
+    }
+    if params.get("audience"):
+        c["audience"] = params["audience"]
+    if params.get("action_digest"):
+        c["action_digest"] = params["action_digest"]
+    if params.get("obtain_hints"):
+        c["obtain_hints"] = params["obtain_hints"]
+    if params.get("retry_timing"):
+        c["retry_timing"] = params["retry_timing"]
+    validate_challenge(c)
+    return c
+
+
+def build_challenge_from_requirement(req: dict, result: dict, params: dict) -> dict:
+    """Go `BuildChallengeFromRequirement(req, result, params) (Challenge, error)`.
+
+    A satisfied result needs no challenge, and a hard denial with nothing
+    missing is reported as such rather than dressed up as a retryable request.
+    """
+    validate_requirement(req)
+    if result.get("verdict") == EVIDENCE_SATISFIED:
+        raise ChallengeNotOutstanding("challenge_not_outstanding: requirement %s is satisfied" % req.get("requirement_id"))
+
+    required: list = []
+    for role in result.get("missing_roles") or []:
+        required.append({"id": role, "reason": "role_unfilled"})
+    for evaluation in result.get("constraints") or []:
+        if evaluation.get("verdict") == EVIDENCE_SATISFIED:
+            continue
+        required.append({
+            "id": evaluation.get("constraint"),
+            "constraint": evaluation.get("constraint"),
+            "reason": evaluation.get("reason", ""),
+        })
+    if len(required) == 0:
+        raise ChallengeNotOutstanding(
+            "challenge_not_outstanding: requirement %s reported no outstanding item" % req.get("requirement_id"))
+
+    params = dict(params)
+    params.setdefault("requirement_id", req.get("requirement_id"))
+    c = _build_challenge(required, params)
+    c["requirement_id"] = req.get("requirement_id")
+    c["requirement_digest"] = requirement_digest(req)
+    validate_challenge(c)
+    return c
+
+
+def build_challenge_from_decision(d: dict, params: dict) -> dict:
+    """Go `BuildChallengeFromDecision(d, params) (Challenge, error)` — for an
+    authorization decision carrying §8.4 residual obligations."""
+    check_decision_shape(d)
+    if d.get("verdict") != VERDICT_ALLOW_UNRESOLVED:
+        raise ChallengeNotOutstanding(
+            "challenge_not_outstanding: verdict %s carries no residual obligation" % d.get("verdict"))
+    items = [{"id": constraint_identity(o), "constraint": o, "reason": "obligation_undischarged"}
+             for o in obligations(d)]
+    return _build_challenge(items, params)
+
+
+# --- register/semantics/envelope.go ------------------------------------------
+
+class EnvelopeShape(CLCError):
+    pass
+
+
+class EnvelopePayloadType(CLCError):
+    pass
+
+
+class EnvelopeSubjectMismatch(CLCError):
+    pass
+
+
+class EnvelopeSignature(CLCError):
+    pass
+
+
+PAYLOAD_TYPE_IN_TOTO = "application/vnd.in-toto+json"
+STATEMENT_TYPE_IN_TOTO = "https://in-toto.io/Statement/v1"
+PREDICATE_TYPE_CLC_DECISION = "https://varwof.com/clc/v1/decision-record"
+
+# subjectNameAction / subjectNameInputs — the two subject entries the profile
+# pins, so an envelope whose statement does not carry the decision's own
+# action/input digests is re-targetable and is refused.
+SUBJECT_NAME_ACTION = "action"
+SUBJECT_NAME_INPUTS = "clc-inputs"
+
+_IN_TOTO_ALGS = {DIGEST_ALG_SHA256: "sha256", "sha-384": "sha384", "sha-512": "sha512"}
+
+
+def pae(payload_type: str, payload: Any) -> bytes:
+    """Go `PAE(payloadType, payload) []byte` — the DSSE v1 pre-authentication
+    encoding:
+
+        PAE(type, body) = "DSSEv1" SP LEN(type) SP type SP LEN(body) SP body
+
+    DSSE signs these bytes, not the payload alone, so a payload cannot be
+    reinterpreted under a different type."""
+    if isinstance(payload, str):
+        payload = payload.encode("utf-8")
+    out = b"DSSEv1"
+    for part in (payload_type.encode("utf-8"), payload):
+        out += b" " + str(len(part)).encode("ascii") + b" " + part
+    return out
+
+
+def new_statement(rec: dict) -> dict:
+    """Go `NewStatement(rec) (Statement, error)` — the in-toto statement for a
+    decision record.  The subjects are the action and the decision's own input
+    digest, so both are covered by any signature over the statement."""
+    operations = rec.get("inputs", {}).get("operations") or []
+    if len(operations) != 1:
+        raise EnvelopeShape("envelope_shape: %d operations" % len(operations))
+    if not rec.get("input_digest", {}).get("alg") or not rec.get("input_digest", {}).get("value"):
+        raise EnvelopeShape("envelope_shape: record carries no input digest")
+    alg = _IN_TOTO_ALGS.get(rec["input_digest"]["alg"])
+    if alg is None:
+        raise EnvelopeShape('envelope_shape: unsupported digest algorithm "%s"' % rec["input_digest"]["alg"])
+    action_bytes = canonical_json(operations).encode("utf-8")
+    action_digest = hashlib.sha256(action_bytes).hexdigest()
+    return {
+        "_type": STATEMENT_TYPE_IN_TOTO,
+        "subject": [
+            {"name": SUBJECT_NAME_ACTION, "digest": {alg: action_digest}},
+            {"name": SUBJECT_NAME_INPUTS,
+             "digest": {alg: base64.b64decode(rec["input_digest"]["value"]).hex()}},
+        ],
+        "predicateType": PREDICATE_TYPE_CLC_DECISION,
+        "predicate": rec,
+    }
+
+
+def new_envelope(rec: dict) -> dict:
+    """Go `NewEnvelope(rec) (Envelope, error)` — wraps a decision record in an
+    unsigned DSSE envelope.
+
+    `payload` and every signature hold the *decoded* text of Go's in-memory
+    `[]byte`, not the bytes encoding/json would put on the wire.  Go writes them
+    as base64; this port writes the same bytes as inline JSON strings, so a
+    port-produced envelope is not byte-identical to a Go-produced one.  The
+    signature covers PAE(payloadType, payload) — the raw bytes — which is
+    identical either way, so verification is unaffected."""
+    st = new_statement(rec)
+    return {
+        "payload": canonical_json(st),
+        "payloadType": PAYLOAD_TYPE_IN_TOTO,
+        "signatures": [],
+    }
+
+
+def envelope_statement(e: dict) -> dict:
+    """Go `(Envelope) Statement() (Statement, error)`."""
+    if e.get("payloadType") != PAYLOAD_TYPE_IN_TOTO:
+        raise EnvelopePayloadType('envelope_payload_type: %s' % _q(e.get("payloadType")))
+    if not e.get("payload"):
+        raise EnvelopeShape("envelope_shape: empty payload")
+    payload = e["payload"]
+    if isinstance(payload, (bytes, bytearray)):
+        payload = payload.decode("utf-8")
+    try:
+        return json.loads(payload)
+    except ValueError as exc:
+        raise EnvelopeShape("envelope_shape: %s" % exc)
+
+
+def envelope_decision_record(e: dict) -> dict:
+    """Go `(Envelope) DecisionRecord() (DecisionRecord, error)` — the record
+    carried as the predicate."""
+    return envelope_statement(e)["predicate"]
+
+
+def envelope_sign(e: dict, key_id: str, sign) -> None:
+    """Go `(Envelope) Sign(keyID, sign) error` — appends a signature over
+    PAE(payloadType, payload).  The signing primitive is supplied by the
+    caller: DSSE deliberately leaves the signature format to the out-of-band
+    agreement."""
+    if sign is None:
+        raise EnvelopeShape("envelope_shape: nil signer")
+    sig = sign(pae(e["payloadType"], e["payload"]))
+    e.setdefault("signatures", []).append({"keyid": key_id, "sig": sig})
+    return None
+
+
+def _match_subject(got: list, want: dict) -> None:
+    for s in got:
+        if s.get("name") != want.get("name"):
+            continue
+        for alg, value in (want.get("digest") or {}).items():
+            if (s.get("digest") or {}).get(alg) != value:
+                raise EnvelopeSubjectMismatch(
+                    'envelope_subject_mismatch: subject "%s" digest mismatch' % want.get("name"))
+            return None
+    raise EnvelopeSubjectMismatch('envelope_subject_mismatch: subject "%s" missing' % want.get("name"))
+
+
+def envelope_check(e: dict) -> None:
+    """Go `(Envelope) Check() error` — internal consistency without any
+    signature: payload type, statement shape, subject binding to the decision,
+    and the record's own digest/recomputation."""
+    st = envelope_statement(e)
+    if st.get("_type") != STATEMENT_TYPE_IN_TOTO:
+        raise EnvelopeShape('envelope_shape: statement type %s' % _q(st.get("_type")))
+    if st.get("predicateType") != PREDICATE_TYPE_CLC_DECISION:
+        raise EnvelopeShape('envelope_shape: predicate type %s' % _q(st.get("predicateType")))
+    record_verify(st["predicate"])
+    want = new_statement(st["predicate"])
+    for w in want["subject"]:
+        _match_subject(st.get("subject") or [], w)
+    return None
+
+
+def envelope_verify_record(e: dict, verify) -> None:
+    """Go `(Envelope) VerifyRecord(verify) error` — checks the envelope and then
+    requires at least one signature to verify.  `verify` is the caller's
+    signature primitive; it receives the KEYID hint (which MUST NOT be trusted
+    on its own) and the PAE bytes."""
+    envelope_check(e)
+    signatures = e.get("signatures") or []
+    if len(signatures) == 0:
+        raise EnvelopeSignature("envelope_signature: no signatures")
+    if verify is None:
+        raise EnvelopeSignature("envelope_signature: nil verifier")
+    pae_bytes = pae(e["payloadType"], e["payload"])
+    first_error = None
+    for sig in signatures:
+        if not sig.get("sig"):
+            if first_error is None:
+                first_error = EnvelopeSignature("envelope_signature: empty signature")
+            continue
+        try:
+            verify(sig.get("keyid"), pae_bytes, sig["sig"])
+            return None
+        except Exception as exc:  # noqa: BLE001 - any verifier failure is a refusal
+            if first_error is None:
+                first_error = EnvelopeSignature("envelope_signature: %s" % exc)
+    if first_error is not None:
+        raise first_error
+    return None
+
+
+# --- register/semantics/match.go ---------------------------------------------
+
+class ActionShape(CLCError):
+    pass
+
+
+class ActionSuite(CLCError):
+    pass
+
+
+class ActionNotMatchable(CLCError):
+    pass
+
+
+class ActionProjectionLossy(CLCError):
+    pass
+
+
+SUITE_JCS_SHA256 = "jcs-sha256"
+ACTION_ID_PREFIX = "clc-action:1"
+
+MATCH_EXACT = "MATCH"
+MATCH_NOT_EQUIVALENT = "NOT_EQUIVALENT"
+MATCH_INDETERMINATE = "INDETERMINATE"
+
+_SHA256_SIZE = 32
+
+
+def action_type_definition(type_: str, material_fields: list) -> dict:
+    """Go `ActionTypeDefinition` — the declared material field set of one action
+    type.  Required and optional-but-included fields are both listed here."""
+    return {"type": type_, "material_fields": list(material_fields or [])}
+
+
+def validate_action_type_definition(d: dict) -> None:
+    """Go `(ActionTypeDefinition) Validate() error`."""
+    if not d.get("type"):
+        raise ActionShape("action_shape: action type required")
+    fields = d.get("material_fields") or []
+    if len(fields) == 0:
+        raise ActionShape("action_shape: action type %s declares no material fields" % d.get("type"))
+    seen = set()
+    for f in fields:
+        if not f:
+            raise ActionShape("action_shape: empty material field name")
+        if f in seen:
+            raise ActionShape('action_shape: duplicate material field "%s"' % f)
+        seen.add(f)
+    return None
+
+
+def action_id(type_: str, suite: str, digest_: dict) -> dict:
+    """Go `ActionId` — a typed, suite-tagged content identity for the material
+    content of one action."""
+    return {"type": type_, "suite": suite, "digest": digest_}
+
+
+def _suite_valid(suite: str) -> bool:
+    return suite == SUITE_JCS_SHA256
+
+
+def _digest_alg_of(suite: str) -> str:
+    return DIGEST_ALG_SHA256 if suite == SUITE_JCS_SHA256 else ""
+
+
+def validate_action_id(a: dict) -> None:
+    """Go `(ActionId) Validate() error` — the identifier's own shape."""
+    if not a.get("type"):
+        raise ActionShape("action_shape: action type required")
+    if not _suite_valid(a.get("suite")):
+        raise ActionSuite('action_suite: %s' % _q(a.get("suite")))
+    d = a.get("digest") or {}
+    if not d.get("alg") or not d.get("value"):
+        raise ActionShape("action_shape: action digest required")
+    # The digest length is suite-pinned: for jcs-sha256 the value must be
+    # exactly 32 bytes.
+    raw = base64.urlsafe_b64decode(_b64url_pad(d["value"]))
+    if a.get("suite") == SUITE_JCS_SHA256 and len(raw) != _SHA256_SIZE:
+        raise ActionShape("action_shape: %s digest must be %d bytes, got %d" % (
+            a.get("suite"), _SHA256_SIZE, len(raw)))
+    return None
+
+
+_B64URL_RE = re.compile(r"[A-Za-z0-9_-]*")
+
+
+def _b64url_strict(s: str) -> bool:
+    """Go's `base64.RawURLEncoding.DecodeString`: alphabet only, no padding
+    character, and a length that could not be produced by encoding bytes.
+    Python's `b64decode` discards characters outside the alphabet instead of
+    failing, so `!!` would decode to empty bytes rather than be refused."""
+    if not _B64URL_RE.fullmatch(s or ""):
+        return False
+    return len(s or "") % 4 != 1
+
+
+def _b64url_pad(s: str) -> str:
+    return s + "=" * (-len(s) % 4)
+
+
+def action_id_string(a: dict) -> str:
+    """Go `(ActionId) String() string` —
+    clc-action:1:<type>:<suite>:<digest-b64url>."""
+    return "%s:%s:%s:%s" % (ACTION_ID_PREFIX, a.get("type"), a.get("suite"),
+                            a.get("digest", {}).get("value", ""))
+
+
+def parse_action_id(s: str) -> dict:
+    """Go `ParseActionId(s) (ActionId, error)` — parses the string form."""
+    parts = s.split(":")
+    if len(parts) != 5 or parts[0] != "clc-action" or parts[1] != "1":
+        raise ActionShape('action_shape: %s' % _q(s))
+    if not _b64url_strict(parts[4]):
+        raise ActionShape("action_shape: digest is not base64url: %s" % _q(s))
+    ident = action_id(parts[2], parts[3],
+                      {"alg": _digest_alg_of(parts[3]), "value": parts[4]})
+    validate_action_id(ident)
+    return ident
+
+
+def material_projection(d: dict, action: dict) -> dict:
+    """Go `MaterialProjection(def, action) (map[string]any, error)` — the map
+    ComputeActionID hashes, so a caller can disclose exactly what entered the
+    identity."""
+    validate_action_type_definition(d)
+    out: dict = {}
+    for field in d["material_fields"]:
+        if field not in action:
+            raise ActionNotMatchable(
+                'action_not_matchable: material field "%s" absent for %s' % (field, d["type"]))
+        out[field] = action[field]
+    return out
+
+
+def material_field_digest(d: dict, action: dict) -> list:
+    """Go `MaterialFieldDigest(def, action) ([]string, error)` — the per-field
+    digests of the material projection in a deterministic order."""
+    projection = material_projection(d, action)
+    out = []
+    for field in sorted(projection):
+        canonical = canonical_json(projection[field]).encode("utf-8")
+        out.append("%s:%s" % (field, hashlib.sha256(canonical).hexdigest()))
+    return out
+
+
+def match(observed: dict, evidence: dict) -> str:
+    """Go `Match(observed, evidence) MatchVerdict` — compares a natively
+    verified evidence identity with the executor's observed identity.  It never
+    guesses: anything it cannot decide is INDETERMINATE."""
+    try:
+        validate_action_id(observed)
+        validate_action_id(evidence)
+    except CLCError:
+        return MATCH_INDETERMINATE
+    if observed.get("type") != evidence.get("type") or observed.get("suite") != evidence.get("suite"):
+        # Cross-type or cross-suite comparison is a mapping problem, not an
+        # inequality.
+        return MATCH_INDETERMINATE
+    if digest_equal(observed.get("digest", {}), evidence.get("digest", {})):
+        return MATCH_EXACT
+    return MATCH_NOT_EQUIVALENT
+
+
+def action_mapping_profile(id_: str, digest_: dict) -> dict:
+    """Go `ActionMappingProfile` — names a projection by its content hash and is
+    pinned by the relying party."""
+    return {"id": id_, "digest": digest_}
+
+
+def mapping_profile_pinned(profile: Optional[dict]) -> bool:
+    """Go `(ActionMappingProfile) Pinned() bool` — a profile without a usable
+    digest cannot be pinned, and an unpinned profile establishes nothing."""
+    if not profile:
+        return False
+    return bool(profile.get("id")) and digest_usable(profile.get("digest"))
+
+
+def map_and_match(profile: dict, projector, evidence: dict, expected: dict) -> str:
+    """Go `MapAndMatch(profile, projector, evidence, expected) MatchVerdict`.
+
+    Every failure mode — unpinned profile, projector error, or a projection
+    that changes material content — is INDETERMINATE, never MATCH."""
+    if not mapping_profile_pinned(profile) or projector is None:
+        return MATCH_INDETERMINATE
+    try:
+        projected = projector(profile, evidence)
+    except Exception:
+        return MATCH_INDETERMINATE
+    if projected.get("type") != expected.get("type") or projected.get("suite") != expected.get("suite"):
+        return MATCH_INDETERMINATE
+    return match(expected, projected)
