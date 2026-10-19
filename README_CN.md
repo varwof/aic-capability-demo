@@ -17,6 +17,25 @@ AIC 能力授权语义的端到端可运行演示：**AI 提出最小权限 → 
 本包消费 [`varwof/capability`](https://github.com/varwof/capability) 的能力数据与一致性语料，
 并实现与 Go 参考实现 [`varwof/register`](https://github.com/varwof/register) 相同的 CLC-v1 语义。
 
+## 可安装实现包（预览）
+
+Python 与 TypeScript 实现已经具备独立发行元数据，预期包名为 `varwof-clc` 和
+`@varwof/clc`；目前尚未发布到 PyPI 或 npm。
+
+```bash
+# Python wheel
+python3 -m pip wheel . --no-deps -w /tmp/varwof-clc-dist
+
+# TypeScript ESM/CJS/类型声明与 tarball
+npm ci --prefix ts
+npm --prefix packages/typescript test
+(cd packages/typescript && npm pack --pack-destination /tmp)
+```
+
+Python 包提供 `import varwof_clc as clc`；TypeScript 包从 `@varwof/clc`
+提供相同的核心 API，并通过 `evidence`、`scheme` 与 `ocmp` 命名空间暴露扩展功能。
+一致性语料仍位于 `varwof/capability`，不进入两个运行时包。
+
 ## 0. 克隆并运行（新机器三步）
 
 ```bash
@@ -105,16 +124,29 @@ python3 scenario-demo.py --scenario mcp --principal-cert principal.pem \
 | `param-bounds-meet-property-run.py` | §6.6 meet 不变式属性 runner（500 例） |
 | `contain-property-run.py` | CLC-D 前向闭包属性 runner（784 例） |
 | `edge_test.py` | raw/解码边界套件（非有限值、非法 Unicode、JCS 大小、params **与约束**中的 I-JSON 整数界） |
+| `extended_test.py` | 参数边界、record、context、source chain、evidence、requirement、challenge、envelope、action binding、combine 与 resolve 的 166 项正反测试 |
+| `extension-parity-run.py` | 输出共享三语言 canonical parity fixture 的 Python 侧 |
 | `contains_test.py` | 与 Go 参考实现的包含关系一致性检查 |
 | `jcs_check.py` | RFC 8785（JCS）规范化：字节、摘要、`clc-action:` id、键序、非法 Unicode |
-| `ts/` | 上述全部的 TypeScript 镜像（仅 Node，零 npm 依赖） |
+| `ts/` | 上述全部的 TypeScript 镜像；零运行时 npm 依赖，`typescript` 与 `@types/node` 仅用于开发期检查 |
+| `ts/extended_test.ts` | TypeScript 的 166 项扩展测试 |
+| `ts/extension-parity-run.ts` | 输出共享 canonical parity fixture 的 TypeScript 侧 |
+| `ts/tsconfig.json` | strict `tsc --noEmit` 配置 |
+| `coverage-run.sh` | Python 组合分支覆盖率（最低 80%），输出 JSON/XML 报告 |
+| `python-runtime-matrix.sh` | 在 Python 3.10 至 3.14 上运行完整 Python 套件与 wheel 安装测试 |
+| `ts/coverage-test.sh` | TypeScript 生产文件覆盖率门槛：行 80%、分支 70%、函数 85% |
+| `ts/runtime-matrix.sh` | 在已安装的 Node、Bun、Deno 中运行完整 TypeScript 测试套件 |
+| `pyproject.toml` / `varwof_clc/` | setuptools 发行元数据与 Python 包门面 |
+| `packages/typescript/` | npm 包元数据及 ESM、CommonJS、类型声明构建 |
 | `fuzz/` | 确定性差分模糊测试框架（`gen_cases.py`、`run_py.py`、`run_ts.ts`、`compare.py`、`shrink.py`） |
 | `clc-v1-parity-report.md` | 跨实现一致性记录 |
 | `fuzz-divergence-report.md` | 当前锁定点上的差分模糊结果，含仍未关闭的发现 |
 
-本包只为自己实现的语料提供 runner；证据侧（`evidence-vectors.json`）与 crosswalk
-（`crosswalk-vectors.json`）语料由 [`varwof/register`](https://github.com/varwof/register)
-中的 Go runner 运行。
+本包为自己实现的语料提供 runner。共享的
+`extension-parity-vectors.json` fixture 位于 `varwof/capability`；Go、Python
+和 TypeScript 各自校验固定输出，CI 对三方 canonical JSON 做逐字节比较。
+`evidence-vectors.json` 与 `crosswalk-vectors.json` 语料仍由
+[`varwof/register`](https://github.com/varwof/register) 中的 Go runner 运行。
 
 ## 4. 验证矩阵（全部通过）
 
@@ -161,7 +193,7 @@ python3 scenario-demo.py --scenario mcp --principal-cert principal.pem \
 |---|---|---|---|
 | Go | `varwof/register`（`semantics/`） | `go run ./cmd/vectors-run/` | `go test ./semantics/ -run TestIntersectionProperty` |
 | Python | 本仓 | `python3 vectors-run.py` | `python3 property_test.py` |
-| TypeScript | `ts/`（Node 22 `--experimental-strip-types`，零 npm 依赖） | `node --experimental-strip-types ts/vectors-run.ts` | `node --experimental-strip-types ts/property.ts` |
+| TypeScript | `ts/`（Node 22 `--experimental-strip-types`；零运行时 npm 依赖） | `node --experimental-strip-types ts/vectors-run.ts` | `node --experimental-strip-types ts/property.ts` |
 
 ```bash
 # 三个实现，跑 varwof/capability 里的共享语料
@@ -173,7 +205,26 @@ node --experimental-strip-types ts/vectors-run.ts && node --experimental-strip-t
 # RFC 8785 规范化（rev CLC-1.6）：Go、Python 与 TypeScript 必须产出
 # 相同的 JCS 字节、摘要与 clc-action: 标识。
 python3 jcs_check.py && node --experimental-strip-types ts/jcs_check.ts
+# TypeScript strict 检查与扩展 canonical parity
+(cd ts && npm ci && npm run typecheck)
+CLC_CAPABILITY_DIR=../capability python3 extension-parity-run.py
+CLC_CAPABILITY_DIR=../capability node --experimental-strip-types ts/extension-parity-run.ts
+(cd ../register && go run ./cmd/extension-parity-run)
+# 覆盖率门槛与机器可读报告
+COVERAGE=coverage bash coverage-run.sh
+bash ts/coverage-test.sh
+
+# Python 3.10-3.14 兼容性矩阵
+bash python-runtime-matrix.sh
+
+# Node、Bun、Deno 运行时矩阵
+bash ts/runtime-matrix.sh
 ```
+
+2026-10-19 覆盖率基线：Python 生产模块的组合语句/分支覆盖率为 **85%**；
+TypeScript 为 **行 90.42%、分支 80.88%、函数 95.47%**。CI 要求 Python 80%、
+TypeScript 行 80%、分支 70%、函数 85%，用于防止覆盖率回退。
+Python 兼容性通过 3.10 至 3.14 的完整套件与逐版本 wheel 安装 smoke test 验证。
 
 语料（位于 [`varwof/capability`](https://github.com/varwof/capability) 的 `data/_vectors/`）：
 `clc-v1/vectors.json`（CLC-A 授权向量，含 rev CLC-1.3 的 `allow_unresolved` verdict 与 §9.1
@@ -182,7 +233,8 @@ python3 jcs_check.py && node --experimental-strip-types ts/jcs_check.ts
 `param-bounds-meet-vectors.json`（27）、`param-bounds-equality-vectors.json`（11）、
 `constraint-union-vectors.json`（12）、`constraint-union-collation-vectors.json`（2）、
 `resolve-vectors.json`（26）、`property-cases.json`（1184 条确定性 P11 用例）、
-`param-bounds-meet-property-cases.json`（500）、`offline-vectors.json`（12 条 OCMP 参考
+`param-bounds-meet-property-cases.json`（500）、`extension-parity-vectors.json`
+（1 份 fixture，10 个 canonical 输出与 8 个负向错误码）、`offline-vectors.json`（12 条 OCMP 参考
 用例），以及 `clc-d/` 下的 `containment-vectors.json`（64）、
 `authorize-chain-vectors.json`（15）、`containment-crosswalk-vectors.json`（44）、
 `containment-property-cases.json`（784）。
@@ -202,7 +254,9 @@ python3 contains-vectors-run.py
 2026-09-11 之前仍在真实输入上产生过分歧：Go 与 Python 实现各自违反了 TypeScript 实现已经
 遵守的规则（布尔精确性、第 6 层先于第 7 层、第 1 层错误码传播）。一致性记录见
 `clc-v1-parity-report.md`；`.github/workflows/clc-conformance.yml` 中的 CI 会克隆
-`varwof/capability`，在每次 push 与 PR 上运行 `py_compile`、向量与属性套件。
+`varwof/capability`，在每次 push 与 PR 上运行 `py_compile`、TypeScript strict
+typecheck、扩展测试、向量、属性套件、覆盖率门槛与三语言 canonical parity diff。
+Python JSON/XML 覆盖率与 TypeScript V8 覆盖率会作为 CI artifact 上传。
 
 ## 9. 差分模糊测试（行为级一致性）
 

@@ -1,0 +1,51 @@
+{
+  "name": "@varwof/clc",
+  "version": "0.1.0",
+  "description": "Preview TypeScript implementation of Varwof capability-language semantics",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/cjs/packages/typescript/src/index.js",
+  "module": "./dist/esm/packages/typescript/src/index.js",
+  "types": "./dist/esm/packages/typescript/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/packages/typescript/src/index.d.ts",
+      "import": "./dist/esm/packages/typescript/src/index.js",
+      "require": "./dist/cjs/packages/typescript/src/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "node ../../ts/node_modules/typescript/bin/tsc -p tsconfig.esm.json --noEmit",
+    "test": "npm run typecheck && npm run build",
+    "prepack": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/varwof/aic-capability-demo.git",
+    "directory": "packages/typescript"
+  },
+  "homepage": "https://github.com/varwof/aic-capability-demo",
+  "bugs": {
+    "url": "https://github.com/varwof/aic-capability-demo/issues"
+  },
+  "keywords": [
+    "authorization",
+    "capability",
+    "delegation",
+    "varwof"
+  ]
+}

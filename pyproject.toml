@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "varwof-clc"
+version = "0.1.0"
+description = "Preview Python implementation of Varwof capability-language semantics"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Jijie Wei" },
+]
+keywords = [
+  "authorization",
+  "capability",
+  "delegation",
+  "varwof",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3 :: Only",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/varwof/aic-capability-demo"
+Issues = "https://github.com/varwof/aic-capability-demo/issues"
+
+[tool.setuptools]
+packages = ["varwof_clc"]
+py-modules = [
+  "clc_semantics",
+  "evidence_semantics",
+  "ocmp",
+  "scheme_decl",
+]
+
+[tool.setuptools.package-data]
+varwof_clc = ["py.typed"]

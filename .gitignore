@@ -2,6 +2,13 @@ bin/
 deps/
 __pycache__/
 *.pyc
+node_modules/
+dist/
+.coverage
+build/
+*.egg-info/
+*.whl
+*.tgz
 # generated fuzz artifacts (10万条 dump 不入库)
 fuzz-findings.json
 *.jsonl

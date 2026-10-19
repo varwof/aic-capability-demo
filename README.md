@@ -22,6 +22,27 @@ This package consumes the capability data and conformance corpora from
 same CLC-v1 semantics as the Go reference
 [`varwof/register`](https://github.com/varwof/register).
 
+## Installable implementation packages (preview)
+
+The Python and TypeScript implementations have independent distribution
+metadata for the intended package names `varwof-clc` and `@varwof/clc`. They
+are not published to PyPI or npm yet.
+
+```bash
+# Python wheel
+python3 -m pip wheel . --no-deps -w /tmp/varwof-clc-dist
+
+# TypeScript ESM/CJS/declarations and tarball
+npm ci --prefix ts
+npm --prefix packages/typescript test
+(cd packages/typescript && npm pack --pack-destination /tmp)
+```
+
+The Python package exposes `import varwof_clc as clc`; the TypeScript package
+exposes the same core API from `@varwof/clc`, with `evidence`, `scheme` and
+`ocmp` namespaces. Conformance vectors remain in `varwof/capability` and are
+not part of either runtime package.
+
 ## 0. Clone and run (3 steps on a fresh machine)
 
 ```bash
@@ -114,16 +135,29 @@ carries the older `varwof/llm` identifier.
 | `param-bounds-meet-property-run.py` | §6.6 meet-invariant property runner (500 cases) |
 | `contain-property-run.py` | CLC-D forward-closure property runner (784 cases) |
 | `edge_test.py` | raw/decoded boundary suite (non-finite, malformed Unicode, JCS size, I-JSON integer bound in params **and** constraints) |
+| `extended_test.py` | 166 positive/negative checks for parameter bounds, records, contexts, source chains, evidence, requirements, challenges, envelopes, action binding, combining and resolve |
+| `extension-parity-run.py` | emits the Python side of the shared three-language canonical parity fixture |
 | `contains_test.py` | containment parity checks against the Go reference |
 | `jcs_check.py` | RFC 8785 (JCS) canonicalization: bytes, digest, `clc-action:` id, key order, invalid Unicode |
-| `ts/` | TypeScript mirror of all of the above (Node-only, zero npm deps) |
+| `ts/` | TypeScript mirror of all of the above; zero runtime npm dependencies, with `typescript` and `@types/node` as development dependencies |
+| `ts/extended_test.ts` | the TypeScript 166-check extension suite |
+| `ts/extension-parity-run.ts` | emits the TypeScript side of the shared canonical parity fixture |
+| `ts/tsconfig.json` | strict `tsc --noEmit` configuration |
+| `coverage-run.sh` | Python combined branch coverage (80% minimum), with JSON/XML reports |
+| `python-runtime-matrix.sh` | runs the complete Python suite and wheel smoke test on Python 3.10 through 3.14 |
+| `ts/coverage-test.sh` | TypeScript production-file coverage gates: 80% lines, 70% branches, 85% functions |
+| `ts/runtime-matrix.sh` | runs the complete TypeScript suite under Node, Bun and Deno when available |
+| `pyproject.toml` / `varwof_clc/` | setuptools distribution metadata and Python package facade |
+| `packages/typescript/` | npm package metadata plus ESM, CommonJS and declaration-file build |
 | `fuzz/` | Deterministic differential fuzz harness (`gen_cases.py`, `run_py.py`, `run_ts.ts`, `compare.py`, `shrink.py`) |
 | `clc-v1-parity-report.md` | Cross-implementation parity record |
 | `fuzz-divergence-report.md` | Differential-fuzz result at the current pin, open findings included |
 
-This package ships runners for the corpora it implements; the evidence-side
-(`evidence-vectors.json`) and crosswalk (`crosswalk-vectors.json`) corpora are run
-by the Go runners in
+This package ships runners for the corpora it implements. The shared
+`extension-parity-vectors.json` fixture lives in `varwof/capability`; Go, Python
+and TypeScript validate its fixed outputs and CI compares their canonical JSON
+byte-for-byte. The evidence-vector (`evidence-vectors.json`) and crosswalk
+(`crosswalk-vectors.json`) corpora remain run by the Go runners in
 [`varwof/register`](https://github.com/varwof/register).
 
 ## 4. Verification matrices (all pass)
@@ -178,7 +212,7 @@ reason code and the merged intersection result**:
 |---|---|---|---|
 | Go | `varwof/register` (`semantics/`) | `go run ./cmd/vectors-run/` | `go test ./semantics/ -run TestIntersectionProperty` |
 | Python | this repo | `python3 vectors-run.py` | `python3 property_test.py` |
-| TypeScript | `ts/` (Node 22 `--experimental-strip-types`, zero npm deps) | `node --experimental-strip-types ts/vectors-run.ts` | `node --experimental-strip-types ts/property.ts` |
+| TypeScript | `ts/` (Node 22 `--experimental-strip-types`; zero runtime npm dependencies) | `node --experimental-strip-types ts/vectors-run.ts` | `node --experimental-strip-types ts/property.ts` |
 
 ```bash
 # all three, against the shared corpora in varwof/capability
@@ -190,7 +224,28 @@ node --experimental-strip-types ts/vectors-run.ts && node --experimental-strip-t
 # RFC 8785 canonicalization (rev CLC-1.6): Go, Python and TypeScript must emit
 # the same JCS bytes, digest and clc-action: identifier.
 python3 jcs_check.py && node --experimental-strip-types ts/jcs_check.ts
+# Strict TypeScript and the extension canonical parity fixture
+(cd ts && npm ci && npm run typecheck)
+CLC_CAPABILITY_DIR=../capability python3 extension-parity-run.py
+CLC_CAPABILITY_DIR=../capability node --experimental-strip-types ts/extension-parity-run.ts
+(cd ../register && go run ./cmd/extension-parity-run)
+# Coverage gates and machine-readable reports
+COVERAGE=coverage bash coverage-run.sh
+bash ts/coverage-test.sh
+
+# Python 3.10-3.14 compatibility matrix
+bash python-runtime-matrix.sh
+
+# Node, Bun and Deno runtime matrix
+bash ts/runtime-matrix.sh
 ```
+
+Coverage baseline on 2026-10-19: Python has **85%** combined statement and
+branch coverage across production modules; TypeScript has **90.42% lines,
+80.88% branches and 95.47% functions**. CI requires Python 80% coverage and
+TypeScript 80% lines, 70% branches and 85% functions.
+Python compatibility is tested with Python 3.10 through 3.14, including a
+wheel-install smoke test for each version.
 
 Corpora (in [`varwof/capability`](https://github.com/varwof/capability),
 `data/_vectors/`): `clc-v1/vectors.json` (the CLC-A authorization vectors, incl.
@@ -202,6 +257,7 @@ the rev CLC-1.3 `allow_unresolved` verdict and §9.1 multi-grant aggregation —
 `constraint-union-collation-vectors.json` (2), `resolve-vectors.json` (26),
 `property-cases.json` (1184 deterministic P11 cases),
 `param-bounds-meet-property-cases.json` (500),
+`extension-parity-vectors.json` (1 fixture with 10 canonical outputs and 8 negative errors),
 `offline-vectors.json` (12 OCMP reference cases), and under `clc-d/`
 `containment-vectors.json` (64), `authorize-chain-vectors.json` (15),
 `containment-crosswalk-vectors.json` (44),
@@ -225,7 +281,10 @@ and even so they disagreed on real inputs until 2026-09-11: the Go and Python
 implementations each violated a rule the TypeScript one already followed
 (boolean-exactness, layer-6-before-layer-7, layer-1 code propagation).  The parity record is in `clc-v1-parity-report.md`; the CI in
 `.github/workflows/clc-conformance.yml` clones `varwof/capability` and runs
-`py_compile`, the vectors and the property suite on every push and PR.
+`py_compile`, strict TypeScript typecheck, the extension suites, the vectors,
+the property suite, coverage gates and the three-language canonical parity diff
+on every push and PR. Python JSON/XML coverage and TypeScript V8 coverage are
+uploaded as CI artifacts.
 
 ## 9. Differential fuzz (behavioral parity)
 
