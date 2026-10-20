@@ -236,7 +236,7 @@ Python 兼容性通过 3.10 至 3.14 的完整套件与逐版本 wheel 安装 sm
 `param-bounds-meet-property-cases.json`（500）、`extension-parity-vectors.json`
 （1 份 fixture，10 个 canonical 输出与 8 个负向错误码）、`offline-vectors.json`（12 条 OCMP 参考
 用例），以及 `clc-d/` 下的 `containment-vectors.json`（64）、
-`authorize-chain-vectors.json`（15）、`containment-crosswalk-vectors.json`（44）、
+`authorize-chain-vectors.json`（15）、`containment-crosswalk-vectors.json`（45）、
 `containment-property-cases.json`（784）。
 
 用环境变量把语料指给 runner —— 每份语料对应的变量见

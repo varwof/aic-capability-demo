@@ -260,7 +260,7 @@ the rev CLC-1.3 `allow_unresolved` verdict and §9.1 multi-grant aggregation —
 `extension-parity-vectors.json` (1 fixture with 10 canonical outputs and 8 negative errors),
 `offline-vectors.json` (12 OCMP reference cases), and under `clc-d/`
 `containment-vectors.json` (64), `authorize-chain-vectors.json` (15),
-`containment-crosswalk-vectors.json` (44),
+`containment-crosswalk-vectors.json` (45),
 `containment-property-cases.json` (784).
 
 Point any runner at a corpus through its environment variable — the table in
