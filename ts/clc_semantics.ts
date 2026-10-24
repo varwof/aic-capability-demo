@@ -1,8 +1,9 @@
-// CLC-v1 Capability Language Core - TypeScript reference implementation.
+// CLC-v1 Capability Language Core - TypeScript implementation.
 //
-// This is an independent implementation of the CLC-v1 authorization
-// semantics. It is NOT a translation of the Go or Python implementation; it
-// follows the spec text directly (capability-language-core-v1.md):
+// Cross-language validation of the CLC-v1 authorization semantics under the
+// same stewardship as the Go reference implementation (varwof/register).  It is
+// not presented as an independent implementation.  The semantics follow the
+// spec text (capability-language-core-v1.md):
 //   - §6.2 params representation + input normalization
 //   - §6.3 Entails algorithm
 //   - §7 intersection rules
@@ -10,8 +11,8 @@
 //   - §9 decision function + §9.3 resolved reason ordering + §9.4 reason codes
 //   - §12.1 language revision compatibility
 //
-// The对外判决 must match the Go and Python implementations exactly on the
-// conformance corpus and the shared property cases. Where the reference
+// The outward verdict must match the Go and Python implementations exactly on
+// the conformance corpus and the shared property cases. Where the reference
 // implementations diverge on inputs the corpus does not exercise, this file
 // follows the spec, and the divergence is recorded in
 // capability/data/_vectors/clc-v1/clc-v1-ambiguities.md.
@@ -150,6 +151,10 @@ export function canonicalReason(reason?: string): string {
     const i = reason.indexOf(':');
     return i >= 0 ? reason.slice(0, i) : reason;
 }
+
+// `validateCapabilityID` is the Go-acronym spelling; the 1.15 package
+// exported `validateCapabilityId`, so keep that spelling as an alias.
+export const validateCapabilityId = validateCapabilityID;
 
 export function validateCapabilityID(id?: string | null): void {
     if (!id) {
