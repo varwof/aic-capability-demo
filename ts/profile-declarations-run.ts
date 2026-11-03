@@ -13,6 +13,7 @@ const DECLS = process.env.CLC_PROFILE_DECLARATIONS
 const CORPORA = [
   path.join(CAP, 'data', '_vectors', 'clc-v1', 'crosswalk-vectors.json'),
   path.join(CAP, 'data', '_vectors', 'clc-d', 'containment-crosswalk-vectors.json'),
+  path.join(CAP, 'data', '_vectors', 'clc-d', 'authorize-crosswalk-vectors.json'),
 ];
 const BASES = new Set(['definition-derived', 'mechanically-checkable', 'asserted']);
 

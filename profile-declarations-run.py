@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Validate §13.8.1 obligations 6/7 declarations (Python mirror of the Go
-runner): the declarations conform, they cover exactly the profiles the two
+runner): the declarations conform, they cover exactly the profiles the
 cross-walk corpora use, and every negative case produces its declared code."""
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ DECLS = os.environ.get("CLC_PROFILE_DECLARATIONS", os.path.join(CAP, "data", "_v
 CORPORA = [
     os.path.join(CAP, "data", "_vectors", "clc-v1", "crosswalk-vectors.json"),
     os.path.join(CAP, "data", "_vectors", "clc-d", "containment-crosswalk-vectors.json"),
+    os.path.join(CAP, "data", "_vectors", "clc-d", "authorize-crosswalk-vectors.json"),
 ]
 BASES = {"definition-derived", "mechanically-checkable", "asserted"}
 
