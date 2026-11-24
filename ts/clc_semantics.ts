@@ -183,6 +183,11 @@ export function validateCapabilityID(id?: string | null): void {
             if (i !== parts.length - 1) {
                 throw new SemanticsError('unsupported_wildcard');
             }
+            // §3: a trailing * needs a non-empty action before it; a bare
+            // scheme:* names no class and is a forbidden shape.
+            if (parts.length < 3) {
+                throw new SemanticsError('unsupported_wildcard');
+            }
         }
     }
     // Must have at least scheme:action (§3).

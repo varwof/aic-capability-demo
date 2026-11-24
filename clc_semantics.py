@@ -233,6 +233,10 @@ def validate_capability_id(cid: str) -> None:
                 raise UnsupportedWildcard("unsupported_wildcard")
             if i != len(parts) - 1:
                 raise UnsupportedWildcard("unsupported_wildcard")
+            # §3: a trailing * needs a non-empty action before it; a bare
+            # scheme:* names no class and is a forbidden shape.
+            if len(parts) < 3:
+                raise UnsupportedWildcard("unsupported_wildcard")
 
     if len(parts) < 2:
         raise InvalidCapabilityID("invalid_capability_id")
